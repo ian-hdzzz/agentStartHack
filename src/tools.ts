@@ -335,31 +335,52 @@ function parseConsumoResponse(xml: string): ConsumoResponse {
         }
 
         const consumos: any[] = [];
-        const consumoMatches = xml.match(/<consumo>[\s\S]*?<\/consumo>/gi) ||
-                               xml.match(/<lectura>[\s\S]*?<\/lectura>/gi) || [];
+        // Match <Consumo> elements (capitalized as returned by CEA API)
+        const consumoMatches = xml.match(/<Consumo>[\s\S]*?<\/Consumo>/g) || [];
 
         for (const consumoXml of consumoMatches) {
+            // Extract periodo and decode HTML entities (e.g., &lt;JUN&gt; -> <JUN>)
+            let periodo = parseXMLValue(consumoXml, "periodo") || "";
+            periodo = periodo.replace(/&lt;/g, '').replace(/&gt;/g, '').replace(/ - .*/, '').trim();
+
+            // Get year to build a better period label
+            const año = parseXMLValue(consumoXml, "año") || "";
+            if (año && periodo) {
+                periodo = `${periodo} ${año}`;
+            }
+
+            // Get consumption in cubic meters
+            const metrosCubicos = parseFloat(parseXMLValue(consumoXml, "metrosCubicos") || "0");
+
+            // Check if reading was estimated
+            const estimado = parseXMLValue(consumoXml, "estimado") === "true";
+
+            // Get reading date
+            const fechaLecturaRaw = parseXMLValue(consumoXml, "fechaLectura") || "";
+            const fechaLectura = fechaLecturaRaw ? fechaLecturaRaw.split('T')[0] : "";
+
             consumos.push({
-                periodo: parseXMLValue(consumoXml, "periodo") || parseXMLValue(consumoXml, "fechaLectura") || "",
-                consumoM3: parseFloat(parseXMLValue(consumoXml, "consumo") || parseXMLValue(consumoXml, "m3") || "0"),
-                lecturaAnterior: parseFloat(parseXMLValue(consumoXml, "lecturaAnterior") || "0"),
-                lecturaActual: parseFloat(parseXMLValue(consumoXml, "lecturaActual") || "0"),
-                fechaLectura: parseXMLValue(consumoXml, "fechaLectura") || "",
-                tipoLectura: (parseXMLValue(consumoXml, "tipoLectura") || "real") as 'real' | 'estimada'
+                periodo,
+                consumoM3: metrosCubicos,
+                lecturaAnterior: 0,
+                lecturaActual: 0,
+                fechaLectura,
+                tipoLectura: estimado ? 'estimada' : 'real' as 'real' | 'estimada'
             });
         }
 
-        // Calculate average and trend
-        const promedioMensual = consumos.length > 0
-            ? consumos.reduce((sum, c) => sum + c.consumoM3, 0) / consumos.length
+        // Calculate average and trend (use last 12 months for average)
+        const recentConsumos = consumos.slice(0, 12);
+        const promedioMensual = recentConsumos.length > 0
+            ? recentConsumos.reduce((sum, c) => sum + c.consumoM3, 0) / recentConsumos.length
             : 0;
 
         let tendencia: 'aumentando' | 'estable' | 'disminuyendo' = 'estable';
-        if (consumos.length >= 3) {
+        if (consumos.length >= 6) {
             const recent = consumos.slice(0, 3).reduce((s, c) => s + c.consumoM3, 0) / 3;
-            const older = consumos.slice(-3).reduce((s, c) => s + c.consumoM3, 0) / 3;
-            if (recent > older * 1.1) tendencia = 'aumentando';
-            else if (recent < older * 0.9) tendencia = 'disminuyendo';
+            const older = consumos.slice(3, 6).reduce((s, c) => s + c.consumoM3, 0) / 3;
+            if (recent > older * 1.2) tendencia = 'aumentando';
+            else if (recent < older * 0.8) tendencia = 'disminuyendo';
         }
 
         return {
