@@ -290,21 +290,40 @@ function parseDeudaResponse(xml: string): DeudaResponse {
             return { success: false, error: faultMsg, rawResponse: xml };
         }
 
-        // Parse total debt
-        const totalDeuda = parseFloat(parseXMLValue(xml, "importeTotal") || parseXMLValue(xml, "totalDeuda") || "0");
-        const vencido = parseFloat(parseXMLValue(xml, "importeVencido") || "0");
-        const porVencer = parseFloat(parseXMLValue(xml, "importePorVencer") || "0");
+        // Check for API error response
+        const codigoError = parseXMLValue(xml, "codigoError");
+        if (codigoError && codigoError !== "0") {
+            const descripcionError = parseXMLValue(xml, "descripcionError") || "Error desconocido";
+            return { success: false, error: descripcionError, rawResponse: xml };
+        }
 
-        // Parse conceptos if available
+        // Parse debt values from CEA API response
+        // API returns: deudaTotal, deuda, deudaComision, saldoAnterior, saldoAnteriorTotal
+        const totalDeuda = parseFloat(parseXMLValue(xml, "deudaTotal") || parseXMLValue(xml, "deuda") || "0");
+        const saldoAnterior = parseFloat(parseXMLValue(xml, "saldoAnteriorTotal") || parseXMLValue(xml, "saldoAnterior") || "0");
+        const deudaActual = parseFloat(parseXMLValue(xml, "deuda") || "0");
+
+        // Get client info from response
+        const nombreCliente = parseXMLValue(xml, "nombreCliente") || "";
+        const direccion = parseXMLValue(xml, "direccion") || "";
+
+        // Conceptos - CEA API doesn't return detailed breakdown, so we create summary
         const conceptos: any[] = [];
-        const conceptoMatches = xml.match(/<concepto>[\s\S]*?<\/concepto>/gi) || [];
-
-        for (const conceptoXml of conceptoMatches) {
+        if (saldoAnterior > 0) {
             conceptos.push({
-                periodo: parseXMLValue(conceptoXml, "periodo") || "",
-                concepto: parseXMLValue(conceptoXml, "descripcion") || "",
-                monto: parseFloat(parseXMLValue(conceptoXml, "importe") || "0"),
-                fechaVencimiento: parseXMLValue(conceptoXml, "fechaVencimiento") || "",
+                periodo: "Saldo anterior",
+                concepto: "Adeudo de periodos anteriores",
+                monto: saldoAnterior,
+                fechaVencimiento: "",
+                estado: "vencido" as const
+            });
+        }
+        if (deudaActual > 0) {
+            conceptos.push({
+                periodo: "Periodo actual",
+                concepto: "Consumo del periodo",
+                monto: deudaActual,
+                fechaVencimiento: "",
                 estado: "por_vencer" as const
             });
         }
@@ -313,9 +332,11 @@ function parseDeudaResponse(xml: string): DeudaResponse {
             success: true,
             data: {
                 totalDeuda,
-                vencido,
-                porVencer,
-                conceptos
+                vencido: saldoAnterior,
+                porVencer: deudaActual,
+                conceptos,
+                nombreCliente,
+                direccion
             }
         };
     } catch (error) {

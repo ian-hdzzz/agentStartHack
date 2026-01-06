@@ -92,6 +92,8 @@ export interface DeudaResponse {
         vencido: number;
         porVencer: number;
         conceptos: ConceptoDeuda[];
+        nombreCliente?: string;
+        direccion?: string;
         ultimoPago?: {
             fecha: string;
             monto: number;
