@@ -16,8 +16,6 @@ import type {
     DeudaResponse,
     ConsumoResponse,
     ContratoResponse,
-    Customer,
-    Ticket,
     TicketType,
 } from "./types.js";
 
@@ -26,9 +24,6 @@ import type {
 // ============================================
 
 const CEA_API_BASE = "https://aquacis-cf-int.ceaqueretaro.gob.mx/Comercial/services";
-const SUPABASE_URL = process.env.SUPABASE_URL || "https://your-project.supabase.co";
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
-const CEA_USER_ID = "00d7d94c-a0ac-4b55-8767-5a553d80b39a"; // Default user for tickets
 
 // Proxy configuration for whitelisted IP
 const PROXY_URL = process.env.CEA_PROXY_URL || null; // e.g., "http://10.128.0.7:3128"
@@ -168,46 +163,7 @@ function getMexicoDate(): Date {
     return new Date(new Date().toLocaleString("en-US", { timeZone: "America/Mexico_City" }));
 }
 
-// Database-based folio generation to avoid duplicates
-// Format: {TYPE}-{YYYYMMDD}-{SEQUENCE} (e.g., FUG-20260106-0001)
-async function generateTicketFolioFromDB(ticketType: TicketType): Promise<string> {
-    const typeCode = TICKET_CODES[ticketType];
-    const now = getMexicoDate();
-
-    const year = now.getFullYear().toString();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const dateStr = `${year}${month}${day}`;
-
-    const prefix = `${typeCode}-${dateStr}`;
-
-    try {
-        // Query database for existing folios with this prefix
-        const existingTickets = await supabaseQuery(
-            'tickets',
-            'GET',
-            `folio=like.${prefix}*&select=folio&order=folio.desc&limit=1`
-        );
-
-        let nextNumber = 1;
-
-        if (existingTickets && existingTickets.length > 0) {
-            const lastFolio = existingTickets[0].folio;
-            const match = lastFolio.match(/-(\d{4})$/);
-            if (match) {
-                nextNumber = parseInt(match[1]) + 1;
-            }
-        }
-
-        return `${prefix}-${String(nextNumber).padStart(4, '0')}`;
-    } catch (error) {
-        // Fallback to timestamp-based unique folio
-        const timestamp = now.getTime().toString().slice(-4);
-        return `${prefix}-${timestamp}`;
-    }
-}
-
-// Keep synchronous version for backward compatibility (fallback only)
+// Synchronous folio generation (fallback only)
 // Format: {TYPE}-{YYYYMMDD}-{SEQUENCE} (e.g., ACL-20260106-0001)
 function generateTicketFolio(ticketType: TicketType): string {
     const typeCode = TICKET_CODES[ticketType];
@@ -442,46 +398,7 @@ function parseContratoResponse(xml: string): ContratoResponse {
 }
 
 // ============================================
-// Supabase Helpers
-// ============================================
-
-async function supabaseQuery(
-    table: string,
-    method: 'GET' | 'POST' | 'PATCH',
-    filter?: string,
-    body?: any
-): Promise<any> {
-    const url = `${SUPABASE_URL}/rest/v1/${table}${filter ? `?${filter}` : ''}`;
-
-    const headers: Record<string, string> = {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-        'Prefer': method === 'POST' ? 'return=representation' : 'return=minimal',
-        'Accept-Profile': 'cea', // Specify schema
-        'Content-Profile': 'cea'  // Specify schema for writes
-    };
-
-    const response = await fetchWithRetry(url, {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined
-    });
-
-    if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Supabase error: ${error}`);
-    }
-
-    if (method === 'GET' || method === 'POST') {
-        return response.json();
-    }
-
-    return { success: true };
-}
-
-// ============================================
-// PostgreSQL Helpers (for Chatwoot/AGORA)
+// PostgreSQL Helpers
 // ============================================
 
 async function pgQuery<T = any>(query: string, params?: any[]): Promise<T[]> {
