@@ -646,13 +646,27 @@ Usa cuando el usuario pregunte por su consumo, historial de lecturas, o cuánta 
             }
 
             const data = parsed.data!;
+
+            // Return up to 36 months (3 years) of consumption data
+            const allConsumos = data.consumos.slice(0, 36);
+
+            // Group consumos by year for easier querying
+            const consumosPorAño: Record<string, any[]> = {};
+            for (const c of allConsumos) {
+                const year = c.periodo.split(' ').pop() || 'Unknown';
+                if (!consumosPorAño[year]) consumosPorAño[year] = [];
+                consumosPorAño[year].push(c);
+            }
+
             return {
                 success: true,
                 contrato,
                 promedioMensual: Math.round(data.promedioMensual),
                 tendencia: data.tendencia,
-                consumos: data.consumos.slice(0, 6), // Last 6 months
-                resumen: `Promedio mensual: ${Math.round(data.promedioMensual)} m³ (Tendencia: ${data.tendencia})`
+                consumos: allConsumos.slice(0, 12), // Recent 12 months for display
+                consumosPorAño, // All data grouped by year
+                añosDisponibles: Object.keys(consumosPorAño).sort().reverse(),
+                resumen: `Promedio mensual: ${Math.round(data.promedioMensual)} m³ (Tendencia: ${data.tendencia}). Datos disponibles: ${Object.keys(consumosPorAño).sort().reverse().join(', ')}`
             };
         } catch (error) {
             console.error(`[get_consumo] Error:`, error);
