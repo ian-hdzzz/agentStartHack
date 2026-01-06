@@ -1,0 +1,48 @@
+# CEA Proxy - Standalone Docker Container
+# Run this OUTSIDE of swarm to avoid any interference
+# 
+# Usage:
+#   docker-compose -f docker-compose.proxy.yml up -d
+
+version: '3.8'
+
+services:
+  cea-proxy:
+    image: ubuntu/squid:latest
+    container_name: cea-proxy
+    restart: unless-stopped
+    ports:
+      - "3128:3128"  # Only bind to localhost if you want extra security
+      # - "127.0.0.1:3128:3128"  # Localhost only (use SSH tunnel)
+    volumes:
+      - ./proxy/squid.conf:/etc/squid/squid.conf:ro
+      - squid-cache:/var/spool/squid
+      - squid-logs:/var/log/squid
+    environment:
+      - TZ=America/Mexico_City
+    # Resource limits to prevent any impact on swarm
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    healthcheck:
+      test: ["CMD", "squid", "-k", "check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Completely isolated network - no swarm overlay
+    networks:
+      - cea-proxy-net
+
+networks:
+  cea-proxy-net:
+    driver: bridge
+    # This is a standalone bridge network, NOT connected to swarm
+
+volumes:
+  squid-cache:
+  squid-logs:

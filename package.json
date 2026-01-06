@@ -1,0 +1,37 @@
+{
+  "name": "cea-agent-server",
+  "version": "2.0.0",
+  "description": "CEA Querétaro AI Agent Server - Production Ready",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/test.ts",
+    "test:api": "tsx src/test-api.ts",
+    "test:api:verbose": "tsx src/test-api.ts --verbose",
+    "test:interactive": "tsx src/test.ts --interactive",
+    "clean": "rm -rf dist"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@openai/agents": "^0.0.14",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "openai": "^4.77.0",
+    "pg": "^8.16.3",
+    "undici": "^7.16.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.16.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
