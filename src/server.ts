@@ -194,6 +194,115 @@ app.post("/api/chat", handleChat);
 // Webhook alias (for n8n integration)
 app.post("/webhook", handleChat);
 
+// ============================================
+// Evolution API Webhook Handler
+// ============================================
+
+interface EvolutionWebhook {
+    event: string;
+    instance: string;
+    data: {
+        key: {
+            remoteJid: string;
+            fromMe: boolean;
+            id: string;
+        };
+        pushName?: string;
+        message?: {
+            conversation?: string;
+            extendedTextMessage?: { text: string };
+        };
+        messageType?: string;
+    };
+}
+
+async function sendWhatsAppMessage(instance: string, to: string, text: string): Promise<void> {
+    const evolutionUrl = process.env.EVOLUTION_API_URL || "https://evolution.whoopflow.com";
+    const evolutionKey = process.env.EVOLUTION_API_KEY || "";
+
+    try {
+        const response = await fetch(`${evolutionUrl}/message/sendText/${instance}`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "apikey": evolutionKey
+            },
+            body: JSON.stringify({
+                number: to.replace("@s.whatsapp.net", ""),
+                text: text
+            })
+        });
+
+        if (!response.ok) {
+            console.error(`[Evolution] Failed to send message: ${response.status}`);
+        }
+    } catch (error) {
+        console.error(`[Evolution] Error sending message:`, error);
+    }
+}
+
+app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void> => {
+    const requestId = (req as any).requestId || crypto.randomUUID().substring(0, 8);
+
+    try {
+        const payload = req.body as EvolutionWebhook;
+
+        // Only process incoming messages
+        if (payload.event !== "messages.upsert") {
+            res.json({ status: "ignored", reason: "not a message event" });
+            return;
+        }
+
+        // Ignore messages from self
+        if (payload.data?.key?.fromMe) {
+            res.json({ status: "ignored", reason: "message from self" });
+            return;
+        }
+
+        // Extract message text
+        const messageText = payload.data?.message?.conversation ||
+                           payload.data?.message?.extendedTextMessage?.text || "";
+
+        if (!messageText) {
+            res.json({ status: "ignored", reason: "no text content" });
+            return;
+        }
+
+        const remoteJid = payload.data.key.remoteJid;
+        const instance = payload.instance;
+
+        console.log(`[${requestId}] Evolution webhook from ${remoteJid}: "${messageText.substring(0, 50)}..."`);
+
+        // Process with agent
+        const result = await runWorkflow({
+            input_as_text: messageText,
+            conversationId: remoteJid,
+            metadata: {
+                source: "evolution",
+                instance: instance,
+                pushName: payload.data.pushName
+            }
+        });
+
+        // Send response back via WhatsApp
+        if (result.output_text) {
+            await sendWhatsAppMessage(instance, remoteJid, result.output_text);
+        }
+
+        console.log(`[${requestId}] Response sent to ${remoteJid}`);
+
+        res.json({
+            status: "ok",
+            classification: result.classification,
+            responseLength: result.output_text?.length || 0
+        });
+
+    } catch (error) {
+        console.error(`[${requestId}] Evolution webhook error:`, error);
+        res.status(500).json({ status: "error", message: "Internal error" });
+    }
+});
+
 // Legacy endpoint support
 app.post("/chat", handleChat);
 
@@ -210,7 +319,8 @@ app.use((req: Request, res: Response) => {
             "GET /health - Health check",
             "GET /status - Detailed status",
             "POST /api/chat - Main chat endpoint",
-            "POST /webhook - Webhook endpoint (n8n)"
+            "POST /webhook - Webhook endpoint (n8n)",
+            "POST /webhook/evolution - Evolution API webhook"
         ]
     });
 });
