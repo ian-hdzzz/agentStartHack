@@ -354,6 +354,7 @@ Usa cuando el ciudadano quiera reportar un problema de agua.`,
 
         const supabase = getSupabase();
         if (supabase) {
+            console.log(`[reportar_incidente] Saving to Supabase (quejas)`);
             const texto = [input.descripcion, input.direccion].filter(Boolean).join(". ");
             const row = {
                 texto,
@@ -390,6 +391,7 @@ Usa cuando el ciudadano quiera reportar un problema de agua.`,
             }
         }
 
+        console.log(`[reportar_incidente] Supabase not configured, using AquaHub API`);
         const payload = {
             tipo: input.tipo,
             descripcion: input.descripcion,
