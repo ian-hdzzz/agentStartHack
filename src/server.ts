@@ -100,7 +100,7 @@ async function handleChat(req: Request, res: Response): Promise<void> {
     const requestId = (req as any).requestId || crypto.randomUUID().substring(0, 8);
 
     try {
-        let { message, conversationId, metadata } = req.body as ChatRequest;
+        let { message, image_url, conversationId, metadata } = req.body as ChatRequest;
 
         // Sanitize message input
         if (Array.isArray(message)) {
@@ -112,13 +112,18 @@ async function handleChat(req: Request, res: Response): Promise<void> {
                     message = parsed[0] || "";
                 }
             } catch {
-                // If JSON parse fails, use as-is
+                // ignore
             }
         }
-
-        if (!message || typeof message !== "string") {
+        if (typeof message !== "string") {
+            message = "";
+        }
+        if (!message && image_url) {
+            message = "[El usuario envió una foto]";
+        }
+        if (!message) {
             res.status(400).json({
-                error: "Missing or invalid 'message' field",
+                error: "Missing or invalid 'message' field (or image_url)",
                 response: "",
                 conversationId: conversationId || crypto.randomUUID()
             } as ChatResponse);
@@ -138,6 +143,7 @@ async function handleChat(req: Request, res: Response): Promise<void> {
 
         const result = await runWorkflow({
             input_as_text: message,
+            image_url: image_url,
             conversationId: conversationId,
             metadata: metadata
         });
@@ -188,15 +194,17 @@ interface EvolutionWebhook {
     event: string;
     instance: string;
     data: {
-        key: {
-            remoteJid: string;
-            fromMe: boolean;
-            id: string;
-        };
+        key: { remoteJid: string; fromMe: boolean; id: string };
         pushName?: string;
         message?: {
             conversation?: string;
             extendedTextMessage?: { text: string };
+            imageMessage?: {
+                url?: string;
+                directUrl?: string;
+                caption?: string;
+                base64?: string;
+            };
         };
         messageType?: string;
     };
@@ -243,21 +251,41 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
             return;
         }
 
-        const messageText = payload.data?.message?.conversation ||
-                           payload.data?.message?.extendedTextMessage?.text || "";
+        const msg = payload.data?.message;
+        let messageText = msg?.conversation || msg?.extendedTextMessage?.text || "";
+        let imageUrl: string | undefined;
+
+        const imageMsg = msg?.imageMessage;
+        if (imageMsg) {
+            imageUrl = imageMsg.url || imageMsg.directUrl;
+            if (imageMsg.base64) {
+                imageUrl = `data:image/jpeg;base64,${imageMsg.base64}`;
+            }
+            if (!messageText && imageMsg.caption) {
+                messageText = imageMsg.caption;
+            }
+            if (!messageText) {
+                messageText = "[El usuario envió una foto]";
+            }
+        }
+
+        if (!messageText && !imageUrl) {
+            res.json({ status: "ignored", reason: "no text or image content" });
+            return;
+        }
 
         if (!messageText) {
-            res.json({ status: "ignored", reason: "no text content" });
-            return;
+            messageText = "[El usuario envió una foto]";
         }
 
         const remoteJid = payload.data.key.remoteJid;
         const instance = payload.instance;
 
-        console.log(`[${requestId}] Evolution webhook from ${remoteJid}: "${messageText.substring(0, 50)}..."`);
+        console.log(`[${requestId}] Evolution webhook from ${remoteJid}: "${messageText.substring(0, 50)}..."${imageUrl ? " + image" : ""}`);
 
         const result = await runWorkflow({
             input_as_text: messageText,
+            image_url: imageUrl,
             conversationId: remoteJid,
             metadata: {
                 source: "evolution",

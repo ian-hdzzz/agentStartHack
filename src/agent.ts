@@ -17,6 +17,7 @@ const WELCOME_MESSAGE = `¡Hola! 👋 Bienvenido a WaterHub. Aquí tu voz cuenta
 const MODELS = {
     CLASSIFIER: "gpt-4.1-mini",
     SPECIALIST: "gpt-4.1",
+    SPECIALIST_VISION: "gpt-4o-mini", // para ver fotos (inundación, fuga, etc.)
     INFO: "gpt-4.1-mini"
 } as const;
 
@@ -160,22 +161,27 @@ NO debes:
 
 const subirVozAgent = new Agent({
     name: "WaterHub - Subir Voz",
-    model: MODELS.SPECIALIST,
+    model: MODELS.SPECIALIST_VISION,
     instructions: `Eres el asistente que ayuda a subir la voz de la ciudadania al mapa de WaterHub. Todo es anonimo. No pidas nombre ni telefono.
 
+SI EL USUARIO ENVIO UNA IMAGEN:
+- Reconoce y clasifica el tipo segun lo que se ve: inundacion/desbordamiento (calle inundada, agua acumulada), fuga (agua saliendo de tuberia), alcantarilla tapada/drenaje obstruido, sin agua visible (tanque vacio, llave seca), contaminacion (agua sucia, color/olor raro), infraestructura danada, otro.
+- Responde de inmediato pidiendo la UBICACION: "Gracias por la foto. Para ponerla en el mapa necesito la ubicacion: puedes compartir tu ubicacion (boton de adjuntar > Ubicacion en WhatsApp) o escribir la direccion y colonia (ej: Av X esq Y, Col Z)."
+- No repitas pedir la foto; ya la tienes.
+
 FLUJO (uno a la vez, amigable):
-1. Si pueden, pide una foto del lugar o del problema (opcional: "Si no tienes foto, escribe 'sin foto'").
-2. Pregunta que tipo es: desbordamiento/inundacion, alcantarilla tapada/drenaje obstruido, sin agua/corte, fuga en via publica, agua sucia/contaminacion, otro.
-3. Pregunta donde es: "Comparte tu ubicacion en el mapa (un toque) o escribe la direccion y colonia." Necesitas direccion y colonia (y alcaldia si se puede inferir) para el mapa.
-4. Opcional: una frase de descripcion ("¿Que esta pasando y desde cuando aproximadamente?").
+1. Si enviaron foto: reconoce tipo de la imagen y pide ubicacion (compartir o escribir).
+2. Si no hay foto: puedes pedir foto opcional ("Si tienes foto del lugar, subela; si no, escribe 'sin foto'") o ir directo a tipo y ubicacion.
+3. Pregunta donde es: "Comparte tu ubicacion en el mapa (boton Ubicacion en WhatsApp) o escribe la direccion y colonia." Necesitas direccion y colonia (y alcaldia si se puede) para el mapa.
+4. Opcional: una frase de descripcion.
 5. Confirma en una linea: tipo, ubicacion, "con foto" o "sin foto".
-6. Usa reportar_incidente para registrarlo. Tipos del sistema: fuga, sin_agua, contaminacion, infraestructura, otro. Mapea: desbordamiento -> fuga; alcantarilla tapada -> infraestructura; sin agua -> sin_agua; contaminacion -> contaminacion.
-7. Despues de crear, responde EXACTAMENTE con este mensaje amigable (sin numero de reporte): "¡Genial! Tu voz ya esta en el mapa. Se ve en WaterHub para que la comunidad y las autoridades lo vean. Si mas personas reportan lo mismo en la zona, se le da mas prioridad."
+6. Usa reportar_incidente. Tipos: fuga, sin_agua, contaminacion, infraestructura, otro. Mapea: inundacion/desbordamiento -> fuga; alcantarilla tapada -> infraestructura; sin agua -> sin_agua.
+7. Despues de crear, responde con mensaje amigable en esta linea (sin numero de reporte): "Perfecto, tu voz sera escuchada. Se creo un nuevo reporte en [direccion o colonia que dio]. Ya esta en el mapa de WaterHub para que la comunidad y las autoridades lo vean."
 
 REGLAS:
-- Una cosa a la vez. Tono cercano, crear comunidad.
-- Nunca digas "numero de reporte" ni "folio". Solo "Tu voz ya esta en el mapa."
-- Descripcion puede ser breve; si no dan, usa algo generico como "Reporte ciudadano" pero pide al menos tipo y ubicacion.`,
+- Una cosa a la vez. Tono cercano.
+- Nunca digas "numero de reporte" ni "folio".
+- Si hay imagen, SIEMPRE pide ubicacion despues de reconocer el tipo.`,
     tools: [reportarIncidenteTool],
     modelSettings: {
         temperature: 0.5,
@@ -250,12 +256,22 @@ export async function runWorkflow(input: WorkflowInput): Promise<WorkflowOutput>
 
         const contextualInput = `${buildSystemContext()}\n${input.input_as_text}`;
 
+        const contentArr: Array<{ type: "input_text"; text: string } | { type: "input_image"; image: string }> = [
+            { type: "input_text", text: contextualInput }
+        ];
+        if (input.image_url) {
+            contentArr.push({ type: "input_image", image: input.image_url });
+        }
         const userMessage: AgentInputItem = {
             role: "user",
-            content: [{ type: "input_text", text: contextualInput }]
+            content: contentArr
         };
 
         const workingHistory: AgentInputItem[] = [...conversation.history, userMessage];
+        const classificationHistory: AgentInputItem[] = [
+            ...conversation.history,
+            { role: "user", content: [{ type: "input_text", text: contextualInput }] }
+        ];
         const toolsUsed: string[] = [];
 
         const runner = new Runner({
@@ -266,9 +282,9 @@ export async function runWorkflow(input: WorkflowInput): Promise<WorkflowOutput>
         });
 
         try {
-            // Step 1: Classification
+            // Step 1: Classification (solo texto; el clasificador no usa visión)
             console.log(`[Workflow] Running classification...`);
-            const classificationResult = await runner.run(classificationAgent, workingHistory);
+            const classificationResult = await runner.run(classificationAgent, classificationHistory);
 
             if (!classificationResult.finalOutput) {
                 throw new Error("Classification failed - no output");

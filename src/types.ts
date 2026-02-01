@@ -4,6 +4,8 @@
 
 export interface ChatRequest {
     message: string;
+    /** URL o data URL de imagen (para reconocer tipo: inundación, fuga, etc.) */
+    image_url?: string;
     conversationId?: string;
     contactId?: number;
     metadata?: {
@@ -31,6 +33,8 @@ export type Classification = "subir_voz" | "informacion";
 
 export interface WorkflowInput {
     input_as_text: string;
+    /** URL o data URL de imagen (ej. foto del problema) para que el agente la reconozca */
+    image_url?: string;
     conversationId?: string;
     contactId?: number;
     metadata?: {
