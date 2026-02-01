@@ -27,6 +27,25 @@ for (const envVar of requiredEnvVars) {
 }
 
 // ============================================
+// Reverse Geocoding (Google Maps API)
+// ============================================
+
+async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (!apiKey) return null;
+    try {
+        const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}&language=es`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) return null;
+        const data = (await res.json()) as { results?: { formatted_address?: string }[] };
+        const addr = data.results?.[0]?.formatted_address;
+        return addr || null;
+    } catch {
+        return null;
+    }
+}
+
+// ============================================
 // Express App Setup
 // ============================================
 
@@ -295,12 +314,22 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
             const lng = locationMsg.degreesLongitude ?? locationMsg.longitude;
             const name = locationMsg.name || locationMsg.address || "";
             console.log(`[${requestId}] [Evolution] locationMessage: lat=${lat}, lng=${lng}, name=${name || "(empty)"}, address=${(locationMsg.address || "").substring(0, 40) || "(empty)"}`);
-            const coords = lat != null && lng != null ? `Coordenadas: lat ${lat}, lng ${lng}.` : "";
-            const locationText = name
-                ? `[El usuario compartió su ubicación: ${name}. ${coords}]`
-                : coords
-                    ? `[El usuario compartió su ubicación: ${coords}]`
+            let locationText: string;
+            if (lat != null && lng != null) {
+                const address = await reverseGeocode(lat, lng);
+                if (address) {
+                    locationText = `[El usuario compartió su ubicación: ${address} (lat ${lat}, lng ${lng})]`;
+                    console.log(`[${requestId}] [Evolution] reverse geocode -> "${address.substring(0, 60)}..."`);
+                } else {
+                    locationText = name
+                        ? `[El usuario compartió su ubicación: ${name}. Coordenadas: lat ${lat}, lng ${lng}.]`
+                        : `[El usuario compartió su ubicación: Coordenadas: lat ${lat}, lng ${lng}.]`;
+                }
+            } else {
+                locationText = name
+                    ? `[El usuario compartió su ubicación: ${name}.]`
                     : "[El usuario compartió su ubicación]";
+            }
             messageText = messageText ? `${messageText}\n${locationText}` : locationText;
             console.log(`[${requestId}] [Evolution] location parsed -> input: "${locationText.substring(0, 80)}..."`);
         }
