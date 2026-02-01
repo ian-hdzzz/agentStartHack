@@ -165,23 +165,24 @@ const subirVozAgent = new Agent({
     instructions: `Eres el asistente que ayuda a subir la voz de la ciudadania al mapa de WaterHub. Todo es anonimo. No pidas nombre ni telefono.
 
 SI EL USUARIO ENVIO UNA IMAGEN:
-- Reconoce y clasifica el tipo segun lo que se ve: inundacion/desbordamiento (calle inundada, agua acumulada), fuga (agua saliendo de tuberia), alcantarilla tapada/drenaje obstruido, sin agua visible (tanque vacio, llave seca), contaminacion (agua sucia, color/olor raro), infraestructura danada, otro.
-- Responde de inmediato pidiendo la UBICACION: "Gracias por la foto. Para ponerla en el mapa necesito la ubicacion: puedes compartir tu ubicacion (boton de adjuntar > Ubicacion en WhatsApp) o escribir la direccion y colonia (ej: Av X esq Y, Col Z)."
+- Reconoce y clasifica el tipo segun lo que se ve: inundacion/desbordamiento, fuga, alcantarilla tapada, sin agua, contaminacion, infraestructura danada, otro.
+- Es OBLIGATORIO pedir al menos: (1) UBICACION y (2) una BREVE DESCRIPCION del evento/problema. Responde pidiendo ambos: "Gracias por la foto. Para ponerla en el mapa necesito dos cosas: 1) La ubicacion (comparte tu ubicacion con el boton de WhatsApp o escribe direccion y colonia). 2) Una breve descripcion del problema o evento (que esta pasando, desde cuando, etc.)."
+- Puedes pedir primero la ubicacion y luego la descripcion, o al reves, pero NO crees el reporte hasta tener ambas.
 - No repitas pedir la foto; ya la tienes.
 
 FLUJO (uno a la vez, amigable):
-1. Si enviaron foto: reconoce tipo de la imagen y pide ubicacion (compartir o escribir).
-2. Si no hay foto: puedes pedir foto opcional ("Si tienes foto del lugar, subela; si no, escribe 'sin foto'") o ir directo a tipo y ubicacion.
-3. Pregunta donde es: "Comparte tu ubicacion en el mapa (boton Ubicacion en WhatsApp) o escribe la direccion y colonia." Necesitas direccion y colonia (y alcaldia si se puede) para el mapa.
-4. Opcional: una frase de descripcion.
-5. Confirma en una linea: tipo, ubicacion, "con foto" o "sin foto".
-6. Usa reportar_incidente. Tipos: fuga, sin_agua, contaminacion, infraestructura, otro. Mapea: inundacion/desbordamiento -> fuga; alcantarilla tapada -> infraestructura; sin agua -> sin_agua.
-7. Despues de crear, responde con mensaje amigable en esta linea (sin numero de reporte): "Perfecto, tu voz sera escuchada. Se creo un nuevo reporte en [direccion o colonia que dio]. Ya esta en el mapa de WaterHub para que la comunidad y las autoridades lo vean."
+1. Si enviaron foto: reconoce tipo de la imagen. Pide ubicacion Y descripcion breve (puedes pedir en un mensaje o uno a la vez).
+2. Si no hay foto: puedes pedir foto opcional o ir directo a tipo, ubicacion y descripcion.
+3. Ubicacion: "Comparte tu ubicacion (boton Ubicacion en WhatsApp) o escribe direccion y colonia." Necesitas direccion y colonia (y alcaldia si se puede).
+4. Descripcion: al menos una frase del evento/problema (que pasa, desde cuando). Es obligatoria cuando hubo foto; recomendada siempre.
+5. Confirma en una linea: tipo, ubicacion, descripcion breve, "con foto" o "sin foto".
+6. Usa reportar_incidente. Tipos: fuga, sin_agua, contaminacion, infraestructura, otro. Mapea: inundacion/desbordamiento -> fuga; alcantarilla tapada -> infraestructura; sin agua -> sin_agua. Descripcion: usa lo que el usuario escribio o resume lo que se ve en la foto.
+7. Despues de crear: "Perfecto, tu voz sera escuchada. Se creo un nuevo reporte en [direccion/colonia]. Ya esta en el mapa de WaterHub."
 
 REGLAS:
 - Una cosa a la vez. Tono cercano.
 - Nunca digas "numero de reporte" ni "folio".
-- Si hay imagen, SIEMPRE pide ubicacion despues de reconocer el tipo.`,
+- Si hay imagen: SIEMPRE pide ubicacion Y al menos una descripcion breve antes de crear el reporte.`,
     tools: [reportarIncidenteTool],
     modelSettings: {
         temperature: 0.5,
@@ -305,7 +306,24 @@ export async function runWorkflow(input: WorkflowInput): Promise<WorkflowOutput>
             const selectedAgent = agentMap[classification];
             console.log(`[Workflow] Routing to: ${selectedAgent.name}`);
 
-            const agentResult = await runAgentWithApproval(runner, selectedAgent, workingHistory);
+            let agentResult: { output: string; newItems: AgentInputItem[]; toolsUsed: string[] };
+            try {
+                agentResult = await runAgentWithApproval(runner, selectedAgent, workingHistory);
+            } catch (imageError: unknown) {
+                const err = imageError as { status?: number; message?: string; error?: { message?: string } };
+                const msg = err?.message ?? err?.error?.message ?? "";
+                const isInvalidImage = err?.status === 400 && /image|invalid.*value/i.test(msg);
+                if (input.image_url && isInvalidImage) {
+                    console.log(`[Workflow] Image invalid for API, retrying without image (text only)`);
+                    const workingHistoryNoImage: AgentInputItem[] = [
+                        ...conversation.history,
+                        { role: "user", content: [{ type: "input_text", text: contextualInput }] }
+                    ];
+                    agentResult = await runAgentWithApproval(runner, selectedAgent, workingHistoryNoImage);
+                } else {
+                    throw imageError;
+                }
+            }
             const output = agentResult.output;
             const newItems = agentResult.newItems;
             toolsUsed.push(...agentResult.toolsUsed);
