@@ -58,6 +58,28 @@ function hasStreetOrColonia(components: AddressComponent[]): boolean {
     return types.has("route") || types.has("street_number") || types.has("sublocality") || types.has("sublocality_level_1");
 }
 
+// state = entidad federativa (ej. Ciudad de México / CDMX). alcaldia = la que varía (ej. Álvaro Obregón, Benito Juárez).
+function getAlcaldiaAndState(components: AddressComponent[]): { alcaldia: string; state: string } {
+    const getLong = (type: string) => components.find((c) => c.types.includes(type))?.long_name || "";
+    const getShort = (type: string) => components.find((c) => c.types.includes(type))?.short_name || "";
+    const locality = getLong("locality");
+    const admin2 = getLong("administrative_area_level_2");
+    const state = getShort("administrative_area_level_1") || getLong("administrative_area_level_1");
+    const alcaldia = admin2 || locality;
+    return { alcaldia, state };
+}
+
+function appendAlcaldiaAndStateIfMissing(address: string, alcaldia: string, state: string): string {
+    const lower = address.toLowerCase();
+    const hasAlcaldia = alcaldia && lower.includes(alcaldia.toLowerCase());
+    const hasState = state && lower.includes(state.toLowerCase());
+    if (hasAlcaldia && hasState) return address;
+    const extra: string[] = [];
+    if (!hasAlcaldia && alcaldia) extra.push(alcaldia);
+    if (!hasState && state && state !== alcaldia) extra.push(state);
+    return extra.length ? `${address}, ${extra.join(", ")}` : address;
+}
+
 async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) return null;
@@ -71,6 +93,9 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
         const results = data.results || [];
         if (results.length === 0) return null;
 
+        const firstComps = results[0]?.address_components || [];
+        const { alcaldia, state } = getAlcaldiaAndState(firstComps);
+
         let bestBuilt: string | null = null;
         let bestFormatted: string | null = null;
 
@@ -79,15 +104,81 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
             const built = comps.length ? buildAddressFromComponents(comps) : null;
             const formatted = r.formatted_address || null;
             if (built && hasStreetOrColonia(comps)) {
-                return built;
+                return appendAlcaldiaAndStateIfMissing(built, alcaldia, state);
             }
             if (built && built.length > (bestBuilt?.length ?? 0)) bestBuilt = built;
             if (formatted && formatted.length > (bestFormatted?.length ?? 0)) bestFormatted = formatted;
         }
 
-        if (bestBuilt && (bestBuilt.length >= 15 || (bestBuilt.includes("Col.") || bestBuilt.includes(",")))) return bestBuilt;
+        if (bestBuilt && (bestBuilt.length >= 15 || (bestBuilt.includes("Col.") || bestBuilt.includes(",")))) {
+            return appendAlcaldiaAndStateIfMissing(bestBuilt, alcaldia, state);
+        }
         if (bestFormatted) return bestFormatted;
-        return bestBuilt;
+        return bestBuilt ? appendAlcaldiaAndStateIfMissing(bestBuilt, alcaldia, state) : null;
+    } catch {
+        return null;
+    }
+}
+
+// ============================================
+// Audio transcription (OpenAI Whisper)
+// ============================================
+
+const WHISPER_API = "https://api.openai.com/v1/audio/transcriptions";
+
+async function transcribeAudio(buffer: ArrayBuffer, mimeType?: string): Promise<string | null> {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return null;
+    const ext = mimeType?.includes("mpeg") || mimeType?.includes("mp3") ? "mp3" : "ogg";
+    try {
+        const blob = new Blob([buffer], { type: mimeType || "audio/ogg" });
+        const formData = new FormData();
+        formData.append("file", blob, `audio.${ext}`);
+        formData.append("model", "whisper-1");
+        formData.append("language", "es");
+
+        const res = await fetch(WHISPER_API, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apiKey}` },
+            body: formData,
+            signal: AbortSignal.timeout(30000)
+        });
+        if (!res.ok) {
+            const err = await res.text();
+            console.error(`[Whisper] API error ${res.status}:`, err.substring(0, 200));
+            return null;
+        }
+        const data = (await res.json()) as { text?: string };
+        return data.text?.trim() || null;
+    } catch (e) {
+        console.error("[Whisper] Transcribe error:", e);
+        return null;
+    }
+}
+
+async function getAudioBufferFromMessage(
+    audioMsg: { url?: string; directUrl?: string; base64?: string },
+    evolutionUrl?: string,
+    evolutionKey?: string
+): Promise<ArrayBuffer | null> {
+    if (audioMsg.base64) {
+        try {
+            const bin = Buffer.from(audioMsg.base64, "base64");
+            return bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength);
+        } catch {
+            return null;
+        }
+    }
+    const url = audioMsg.url || audioMsg.directUrl;
+    if (!url) return null;
+    try {
+        const headers: Record<string, string> = {};
+        if (evolutionKey && evolutionUrl && url.startsWith(evolutionUrl)) {
+            headers.apikey = evolutionKey;
+        }
+        const res = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+        if (!res.ok) return null;
+        return await res.arrayBuffer();
     } catch {
         return null;
     }
@@ -288,6 +379,8 @@ interface EvolutionWebhook {
                 name?: string;
                 address?: string;
             };
+            audioMessage?: { url?: string; directUrl?: string; base64?: string; mimetype?: string };
+            pttMessage?: { url?: string; directUrl?: string; base64?: string; mimetype?: string };
         };
         messageType?: string;
     };
@@ -382,6 +475,25 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
             console.log(`[${requestId}] [Evolution] location parsed -> input: "${locationText.substring(0, 80)}..."`);
         }
 
+        const audioMsg = msg?.audioMessage ?? msg?.pttMessage;
+        if (audioMsg) {
+            const evolutionUrl = process.env.EVOLUTION_API_URL || "";
+            const evolutionKey = process.env.EVOLUTION_API_KEY || "";
+            const buffer = await getAudioBufferFromMessage(audioMsg, evolutionUrl, evolutionKey);
+            if (buffer) {
+                const transcription = await transcribeAudio(buffer, audioMsg.mimetype);
+                const audioLabel = msg?.pttMessage ? "nota de voz" : "audio";
+                const transcribed = transcription
+                    ? `[El usuario envió un ${audioLabel}:] ${transcription}`
+                    : `[El usuario envió un ${audioLabel}. No se pudo transcribir.]`;
+                messageText = messageText ? `${messageText}\n${transcribed}` : transcribed;
+                console.log(`[${requestId}] [Evolution] audio transcribed (${transcription?.length ?? 0} chars)`);
+            } else {
+                const fallback = "[El usuario envió un audio. No se pudo obtener el archivo.]";
+                messageText = messageText ? `${messageText}\n${fallback}` : fallback;
+            }
+        }
+
         if (!messageText && !imageUrl) {
             const msgPreview: Record<string, string> = {};
             if (msg) {
@@ -394,8 +506,8 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
                     }
                 }
             }
-            console.log(`[${requestId}] [Evolution] ignored: no text or image content. Message preview: ${JSON.stringify(msgPreview)}`);
-            res.json({ status: "ignored", reason: "no text, image or location content" });
+            console.log(`[${requestId}] [Evolution] ignored: no text, image, location or audio. Message preview: ${JSON.stringify(msgPreview)}`);
+            res.json({ status: "ignored", reason: "no text, image, location or audio content" });
             return;
         }
 
