@@ -205,6 +205,14 @@ interface EvolutionWebhook {
                 caption?: string;
                 base64?: string;
             };
+            locationMessage?: {
+                degreesLatitude?: number;
+                degreesLongitude?: number;
+                latitude?: number;
+                longitude?: number;
+                name?: string;
+                address?: string;
+            };
         };
         messageType?: string;
     };
@@ -252,6 +260,9 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
         }
 
         const msg = payload.data?.message;
+        const messageKeys = msg ? Object.keys(msg) : [];
+        console.log(`[${requestId}] [Evolution] message keys: ${messageKeys.join(", ") || "(none)"}`);
+
         let messageText = msg?.conversation || msg?.extendedTextMessage?.text || "";
         let imageUrl: string | undefined;
 
@@ -261,6 +272,7 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
             if (imageMsg.base64) {
                 imageUrl = `data:image/jpeg;base64,${imageMsg.base64}`;
             }
+            console.log(`[${requestId}] [Evolution] imageMessage: url=${!!imageMsg.url}, directUrl=${!!imageMsg.directUrl}, base64=${!!imageMsg.base64} (len=${imageMsg.base64?.length ?? 0}), caption=${(imageMsg.caption || "").substring(0, 40)}`);
             if (!messageText && imageMsg.caption) {
                 messageText = imageMsg.caption;
             }
@@ -269,8 +281,24 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
             }
         }
 
+        const locationMsg = msg?.locationMessage;
+        if (locationMsg) {
+            const lat = locationMsg.degreesLatitude ?? locationMsg.latitude;
+            const lng = locationMsg.degreesLongitude ?? locationMsg.longitude;
+            const name = locationMsg.name || locationMsg.address || "";
+            console.log(`[${requestId}] [Evolution] locationMessage: lat=${lat}, lng=${lng}, name=${name || "(empty)"}, address=${(locationMsg.address || "").substring(0, 40) || "(empty)"}`);
+            const coords = lat != null && lng != null ? `Coordenadas: lat ${lat}, lng ${lng}.` : "";
+            const locationText = name
+                ? `[El usuario compartió su ubicación: ${name}. ${coords}]`
+                : coords
+                    ? `[El usuario compartió su ubicación: ${coords}]`
+                    : "[El usuario compartió su ubicación]";
+            messageText = messageText ? `${messageText}\n${locationText}` : locationText;
+        }
+
         if (!messageText && !imageUrl) {
-            res.json({ status: "ignored", reason: "no text or image content" });
+            console.log(`[${requestId}] [Evolution] ignored: no text or image content. Raw message keys: ${JSON.stringify(messageKeys)}`);
+            res.json({ status: "ignored", reason: "no text, image or location content" });
             return;
         }
 
@@ -281,7 +309,7 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
         const remoteJid = payload.data.key.remoteJid;
         const instance = payload.instance;
 
-        console.log(`[${requestId}] Evolution webhook from ${remoteJid}: "${messageText.substring(0, 50)}..."${imageUrl ? " + image" : ""}`);
+        console.log(`[${requestId}] [Evolution] from ${remoteJid} -> input_as_text: "${messageText.substring(0, 80)}..."${imageUrl ? ", image_url: (set)" : ""}`);
 
         const result = await runWorkflow({
             input_as_text: messageText,
