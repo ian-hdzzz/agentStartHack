@@ -3,6 +3,7 @@
 // ============================================
 
 import express, { Request, Response, NextFunction } from "express";
+import { spawn } from "node:child_process";
 import { config } from "dotenv";
 import { runWorkflow, getAgentHealth } from "./agent.js";
 import type { ChatRequest, ChatResponse } from "./types.js";
@@ -126,23 +127,44 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
 
 const WHISPER_API = "https://api.openai.com/v1/audio/transcriptions";
 
-// Whisper only accepts: flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm. WhatsApp voice notes = OGG/Opus.
-function whisperFileFormat(mimeType?: string): { ext: string; type: string } {
-    const m = (mimeType || "").toLowerCase();
-    if (m.includes("mpeg") || m.includes("mp3") || m.includes("mpga")) return { ext: "mp3", type: "audio/mpeg" };
-    if (m.includes("webm")) return { ext: "webm", type: "audio/webm" };
-    if (m.includes("wav")) return { ext: "wav", type: "audio/wav" };
-    if (m.includes("m4a") || m.includes("mp4")) return { ext: "m4a", type: "audio/mp4" };
-    if (m.includes("oga")) return { ext: "oga", type: "audio/ogg" };
-    return { ext: "ogg", type: "audio/ogg" };
+// Convierte cualquier audio a MP3 con ffmpeg (Whisper acepta mp3). Requiere ffmpeg instalado.
+function convertAudioToMp3(inputBuffer: ArrayBuffer): Promise<Buffer | null> {
+    return new Promise((resolve) => {
+        const ffmpeg = spawn(
+            "ffmpeg",
+            ["-i", "pipe:0", "-f", "mp3", "-acodec", "libmp3lame", "-ar", "16000", "pipe:1"],
+            { stdio: ["pipe", "pipe", "pipe"] }
+        );
+        const chunks: Buffer[] = [];
+        ffmpeg.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+        ffmpeg.stderr.on("data", () => {});
+        ffmpeg.on("error", () => resolve(null));
+        ffmpeg.on("close", (code) => {
+            if (code === 0 && chunks.length > 0) resolve(Buffer.concat(chunks));
+            else resolve(null);
+        });
+        ffmpeg.stdin.write(Buffer.from(inputBuffer));
+        ffmpeg.stdin.end();
+    });
 }
 
 async function transcribeAudio(buffer: ArrayBuffer, mimeType?: string): Promise<string | null> {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return null;
-    const { ext, type } = whisperFileFormat(mimeType);
+
+    let body: ArrayBuffer = buffer;
+    let ext = "ogg";
+    let type = "audio/ogg";
+
+    const mp3 = await convertAudioToMp3(buffer);
+    if (mp3 && mp3.length > 0) {
+        body = mp3.buffer.slice(mp3.byteOffset, mp3.byteOffset + mp3.byteLength);
+        ext = "mp3";
+        type = "audio/mpeg";
+    }
+
     try {
-        const blob = new Blob([buffer], { type });
+        const blob = new Blob([body], { type });
         const formData = new FormData();
         formData.append("file", blob, `audio.${ext}`);
         formData.append("model", "whisper-1");

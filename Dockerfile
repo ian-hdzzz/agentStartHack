@@ -27,6 +27,9 @@ FROM node:20-alpine AS production
 
 WORKDIR /app
 
+# ffmpeg para convertir notas de voz (opus/ogg) a mp3 para Whisper
+RUN apk add --no-cache ffmpeg
+
 # Add non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
