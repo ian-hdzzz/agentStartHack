@@ -213,6 +213,14 @@ interface EvolutionWebhook {
                 name?: string;
                 address?: string;
             };
+            location?: {
+                degreesLatitude?: number;
+                degreesLongitude?: number;
+                latitude?: number;
+                longitude?: number;
+                name?: string;
+                address?: string;
+            };
         };
         messageType?: string;
     };
@@ -281,7 +289,7 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
             }
         }
 
-        const locationMsg = msg?.locationMessage;
+        const locationMsg = msg?.locationMessage ?? msg?.location;
         if (locationMsg) {
             const lat = locationMsg.degreesLatitude ?? locationMsg.latitude;
             const lng = locationMsg.degreesLongitude ?? locationMsg.longitude;
@@ -294,10 +302,22 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
                     ? `[El usuario compartió su ubicación: ${coords}]`
                     : "[El usuario compartió su ubicación]";
             messageText = messageText ? `${messageText}\n${locationText}` : locationText;
+            console.log(`[${requestId}] [Evolution] location parsed -> input: "${locationText.substring(0, 80)}..."`);
         }
 
         if (!messageText && !imageUrl) {
-            console.log(`[${requestId}] [Evolution] ignored: no text or image content. Raw message keys: ${JSON.stringify(messageKeys)}`);
+            const msgPreview: Record<string, string> = {};
+            if (msg) {
+                for (const k of messageKeys) {
+                    const v = (msg as Record<string, unknown>)[k];
+                    if (v && typeof v === "object" && !Array.isArray(v)) {
+                        msgPreview[k] = JSON.stringify(Object.keys(v as object));
+                    } else {
+                        msgPreview[k] = typeof v;
+                    }
+                }
+            }
+            console.log(`[${requestId}] [Evolution] ignored: no text or image content. Message preview: ${JSON.stringify(msgPreview)}`);
             res.json({ status: "ignored", reason: "no text, image or location content" });
             return;
         }

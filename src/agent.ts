@@ -179,7 +179,7 @@ SI EL USUARIO ENVIO UNA IMAGEN:
 FLUJO (uno a la vez, amigable):
 1. Si enviaron foto: reconoce tipo de la imagen. Pide ubicacion Y descripcion breve (puedes pedir en un mensaje o uno a la vez).
 2. Si no hay foto: puedes pedir foto opcional o ir directo a tipo, ubicacion y descripcion.
-3. Ubicacion: "Comparte tu ubicacion (boton Ubicacion en WhatsApp) o escribe direccion y colonia." Si el mensaje del usuario dice "[El usuario compartió su ubicación" o "Coordenadas: lat", YA tienes la ubicacion: extrae nombre/direccion o "lat X, lng Y" y usala para el reporte (direccion puede ser el nombre del lugar o "lat X, lng Y").
+3. Ubicacion: "Comparte tu ubicacion (boton Ubicacion en WhatsApp) o escribe direccion y colonia." Si el mensaje del usuario dice "[El usuario compartió su ubicación" o "Coordenadas: lat", YA tienes la ubicacion: extrae nombre/direccion o "lat X, lng Y" y SIEMPRE responde confirmando donde esta: "Ubicacion recibida: [nombre del lugar o direccion o lat, lng]. ¿Puedes darme una breve descripcion del problema o evento?" Asi el usuario ve que si la recibiste.
 4. Descripcion: al menos una frase del evento/problema (que pasa, desde cuando). Es obligatoria cuando hubo foto; recomendada siempre.
 5. Confirma en una linea: tipo, ubicacion, descripcion breve, "con foto" o "sin foto".
 6. Usa reportar_incidente. Tipos: fuga, sin_agua, contaminacion, infraestructura, otro. Mapea: inundacion/desbordamiento -> fuga; alcantarilla tapada -> infraestructura; sin agua -> sin_agua. Para direccion: si el usuario compartio ubicacion con nombre/direccion, usala; si solo hay lat/lng, usa "lat X, lng Y" o geocodifica si puedes. Descripcion: usa lo que el usuario escribio o resume lo que se ve en la foto.
@@ -190,7 +190,7 @@ FLUJO (uno a la vez, amigable):
 REGLAS:
 - Una cosa a la vez. Tono cercano.
 - Nunca digas "numero de reporte" ni "folio".
-- Si el usuario ya compartio ubicacion (mensaje con "compartió su ubicación" o coordenadas), NO pidas ubicacion de nuevo; pide solo lo que falte (ej. descripcion) o crea el reporte si ya tienes todo.
+- Si el usuario ya compartio ubicacion (mensaje con "compartió su ubicación" o coordenadas), confirma SIEMPRE donde esta ("Ubicacion recibida: [lugar/direccion/coords]") y pide solo lo que falte (ej. descripcion) o crea el reporte si ya tienes todo.
 - Si hay imagen: pide ubicacion Y descripcion breve antes de crear el reporte.`,
     tools: [reportarIncidenteTool],
     modelSettings: {
@@ -277,11 +277,13 @@ export async function runWorkflow(input: WorkflowInput): Promise<WorkflowOutput>
             content: contentArr
         };
 
+        const userMessageTextOnly: AgentInputItem = {
+            role: "user",
+            content: [{ type: "input_text", text: contextualInput }]
+        };
+
         const workingHistory: AgentInputItem[] = [...conversation.history, userMessage];
-        const classificationHistory: AgentInputItem[] = [
-            ...conversation.history,
-            { role: "user", content: [{ type: "input_text", text: contextualInput }] }
-        ];
+        const classificationHistory: AgentInputItem[] = [...conversation.history, userMessageTextOnly];
         const toolsUsed: string[] = [];
 
         const runner = new Runner({
@@ -341,8 +343,8 @@ export async function runWorkflow(input: WorkflowInput): Promise<WorkflowOutput>
             const isFirstMessage = conversation.history.length === 0;
             const finalOutput = isFirstMessage ? WELCOME_MESSAGE : output;
 
-            // Step 4: Update conversation history (store what the user saw)
-            conversation.history.push(userMessage);
+            // Step 4: Update conversation history — solo texto (nunca imagen) para que el siguiente turno no falle
+            conversation.history.push(userMessageTextOnly);
             if (newItems.length > 0) {
                 conversation.history.push(...newItems);
             } else if (finalOutput) {
@@ -371,8 +373,18 @@ export async function runWorkflow(input: WorkflowInput): Promise<WorkflowOutput>
         } catch (error) {
             console.error(`[Workflow] Error:`, error);
 
+            const errorOutput = "No pude procesar ese mensaje. Cuentame de nuevo: ¿quieres subir tu voz al mapa (foto + ubicación + descripción) o tienes alguna pregunta sobre WaterHub?";
+            conversation.history.push(userMessageTextOnly);
+            conversation.history.push({
+                role: "assistant",
+                content: [{ type: "output_text", text: errorOutput }]
+            } as any);
+            if (conversation.history.length > 20) {
+                conversation.history = conversation.history.slice(-20);
+            }
+
             return {
-                output_text: "Lo siento, tuve un problema procesando tu mensaje. Podrias intentar de nuevo?",
+                output_text: errorOutput,
                 error: error instanceof Error ? error.message : "Unknown error",
                 toolsUsed
             };
