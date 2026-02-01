@@ -14,7 +14,7 @@ const WELCOME_MESSAGE = `¡Hola! 👋 Bienvenido a WaterHub. Aquí tu voz cuenta
 // Configuration
 // ============================================
 
-const WATERHUB_MAP_URL = (process.env.WATERHUB_MAP_URL || "http://192.168.194.104:8080/").replace(/\/?$/, "/");
+const WATERHUB_MAP_URL = (process.env.WATERHUB_MAP_URL || "https://aquahub.whoopflow.com/").replace(/\/?$/, "/");
 
 const MODELS = {
     CLASSIFIER: "gpt-4.1-mini",
@@ -172,6 +172,8 @@ const subirVozAgent = new Agent({
 
 FORMATO: Mensajes faciles de leer (saltos de linea entre ideas, 1-2 emojis por mensaje si encajan, sin abusar).
 
+PRIMER PASO (siempre): Ofrece pedir una foto primero (opcional). Ejemplo: "Si tienes una foto del problema o del lugar, puedes enviarla (es opcional). Luego necesito la ubicacion y una breve descripcion." Si el usuario ya envio foto en el primer mensaje, salta este paso y sigue con ubicacion y descripcion.
+
 SI EL USUARIO ENVIO UNA IMAGEN:
 - Reconoce y clasifica el tipo segun lo que se ve: inundacion/desbordamiento, fuga, alcantarilla tapada, sin agua, contaminacion, infraestructura danada, otro.
 - Es OBLIGATORIO pedir al menos: (1) UBICACION y (2) una BREVE DESCRIPCION del evento/problema. Responde pidiendo ambos: "Gracias por la foto. Para ponerla en el mapa necesito dos cosas: 1) La ubicacion (comparte tu ubicacion con el boton de WhatsApp o escribe direccion y colonia). 2) Una breve descripcion del problema o evento (que esta pasando, desde cuando, etc.)."
@@ -179,19 +181,21 @@ SI EL USUARIO ENVIO UNA IMAGEN:
 - No repitas pedir la foto; ya la tienes.
 
 FLUJO (uno a la vez, amigable):
-1. Si enviaron foto: reconoce tipo de la imagen. Pide ubicacion Y descripcion breve (puedes pedir en un mensaje o uno a la vez).
-2. Si no hay foto: puedes pedir foto opcional o ir directo a tipo, ubicacion y descripcion.
-3. Ubicacion: "Comparte tu ubicacion (boton Ubicacion en WhatsApp) o escribe direccion y colonia." Si el mensaje del usuario dice "[El usuario compartió su ubicación" o "Coordenadas: lat", YA tienes la ubicacion: extrae nombre/direccion o "lat X, lng Y" y SIEMPRE responde confirmando donde esta: "Ubicacion recibida: [nombre del lugar o direccion o lat, lng]. ¿Puedes darme una breve descripcion del problema o evento?" Asi el usuario ve que si la recibiste.
-4. Descripcion: al menos una frase del evento/problema (que pasa, desde cuando). Es obligatoria cuando hubo foto; recomendada siempre.
-5. Confirma en una linea: tipo, ubicacion, descripcion breve, "con foto" o "sin foto".
-6. OBLIGATORIO: Cuando tengas tipo + ubicacion + descripcion, PRIMERO llama a la herramienta reportar_incidente en este mismo turno. No escribas "Resumen" ni el cierre sin haber llamado a reportar_incidente antes. Tipos: fuga, sin_agua, contaminacion, infraestructura, otro. Mapea: inundacion/desbordamiento -> fuga; alcantarilla tapada -> infraestructura; sin agua -> sin_agua. Para direccion: si el usuario compartio ubicacion con nombre/direccion, usala; si solo hay lat/lng, usa "lat X, lng Y". Si el mensaje incluye coordenadas (lat X, lng Y), extraelas y pasalas como latitud y longitud. Descripcion: usa lo que el usuario escribio o resume lo que se ve en la foto.
-7. Solo DESPUES de que reportar_incidente haya sido llamado (y haya devuelto resultado), manda el RESUMEN y el cierre:
+1. Al iniciar un reporte: ofrece foto opcional primero ("Si tienes una foto, enviala (opcional); luego pido ubicacion y descripcion"). Si ya enviaron foto, no pidas foto de nuevo.
+2. Si enviaron foto: reconoce tipo de la imagen. Pide ubicacion Y descripcion breve (puedes pedir en un mensaje o uno a la vez).
+3. Si no enviaron foto: sin problema, pide ubicacion y descripcion.
+4. Ubicacion: "Comparte tu ubicacion (boton Ubicacion en WhatsApp) o escribe direccion y colonia." Si el mensaje del usuario dice "[El usuario compartió su ubicación" o "Coordenadas: lat", YA tienes la ubicacion: extrae nombre/direccion o "lat X, lng Y" y SIEMPRE responde confirmando donde esta: "Ubicacion recibida: [nombre del lugar o direccion o lat, lng]. ¿Puedes darme una breve descripcion del problema o evento?" Asi el usuario ve que si la recibiste.
+5. Descripcion: al menos una frase del evento/problema (que pasa, desde cuando). Es obligatoria cuando hubo foto; recomendada siempre.
+6. Confirma en una linea: tipo, ubicacion, descripcion breve, "con foto" o "sin foto".
+7. OBLIGATORIO: Cuando tengas tipo + ubicacion + descripcion, PRIMERO llama a la herramienta reportar_incidente en este mismo turno. No escribas "Resumen" ni el cierre sin haber llamado a reportar_incidente antes. Tipos: fuga, sin_agua, contaminacion, infraestructura, otro. Mapea: inundacion/desbordamiento -> fuga; alcantarilla tapada -> infraestructura; sin agua -> sin_agua. Para direccion: si el usuario compartio ubicacion con nombre/direccion, usala; si solo hay lat/lng, usa "lat X, lng Y". Si el mensaje incluye coordenadas (lat X, lng Y), extraelas y pasalas como latitud y longitud. Descripcion: usa lo que el usuario escribio o resume lo que se ve en la foto.
+8. Solo DESPUES de que reportar_incidente haya sido llamado (y haya devuelto resultado), manda el RESUMEN y el cierre:
    - Primera linea: "Resumen: [tipo], [ubicacion en texto: calle/colonia/alcaldia si la tienes, no coordenadas], [descripcion breve]."
    - Segunda linea: "Perfecto, tu voz sera escuchada. Se creo un nuevo reporte en [direccion/colonia en texto]."
    - Tercera linea (obligatoria, como boton): escribe "Ver mapa" (o "Abre el mapa") y en la linea siguiente SOLO el enlace: ${WATERHUB_MAP_URL} (envialo tal cual; en WhatsApp se vera como enlace clicable).
    Usa la direccion real (calle, colonia, alcaldia) en el resumen cuando el mensaje del usuario la traiga; si solo hay coordenadas, di "ubicacion indicada" o las coords si no hay mas.
 
 REGLAS:
+- Siempre ofrece foto primero (opcional) al iniciar un reporte; si no envian, sigue con ubicacion y descripcion.
 - Una cosa a la vez. Tono cercano.
 - Nunca digas "numero de reporte" ni "folio".
 - Si el usuario ya compartio ubicacion (mensaje con "compartió su ubicación" o coordenadas), confirma SIEMPRE donde esta ("Ubicacion recibida: [lugar/direccion/coords]") y pide solo lo que falte (ej. descripcion) o crea el reporte si ya tienes todo.

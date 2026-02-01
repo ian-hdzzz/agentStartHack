@@ -5,6 +5,9 @@
 import { config } from "dotenv";
 config();
 
+import * as dns from "node:dns";
+dns.setDefaultResultOrder("ipv4first");
+
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { Pool } from "pg";
 import { tool } from "@openai/agents";
