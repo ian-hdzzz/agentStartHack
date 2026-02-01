@@ -158,7 +158,7 @@ async function transcribeAudio(buffer: ArrayBuffer, mimeType?: string): Promise<
 
     const mp3 = await convertAudioToMp3(buffer);
     if (mp3 && mp3.length > 0) {
-        body = mp3.buffer.slice(mp3.byteOffset, mp3.byteOffset + mp3.byteLength);
+        body = mp3.buffer.slice(mp3.byteOffset, mp3.byteOffset + mp3.byteLength) as ArrayBuffer;
         ext = "mp3";
         type = "audio/mpeg";
     }
