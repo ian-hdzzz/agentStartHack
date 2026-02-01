@@ -5,6 +5,7 @@
 import { config } from "dotenv";
 config();
 
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { tool } from "@openai/agents";
 import { z } from "zod";
 import type { Proveedor, Pedido, Incidente, Alerta, PrediccionResponse } from "./types.js";
@@ -14,6 +15,25 @@ import type { Proveedor, Pedido, Incidente, Alerta, PrediccionResponse } from ".
 // ============================================
 
 const AQUAHUB_API_BASE = process.env.AQUAHUB_API_URL || "http://localhost:8000";
+
+function getSupabase(): SupabaseClient | null {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_ANON_KEY;
+    if (!url || !key) return null;
+    return createClient(url, key);
+}
+
+type TipoQuejaSupabase = "sin_agua" | "fuga" | "agua_contaminada" | "baja_presion" | "otro";
+
+function mapTipoToSupabase(tipo: string): TipoQuejaSupabase {
+    switch (tipo) {
+        case "fuga": return "fuga";
+        case "sin_agua": return "sin_agua";
+        case "contaminacion": return "agua_contaminada";
+        case "infraestructura":
+        default: return "otro";
+    }
+}
 
 // ============================================
 // Utility Functions
@@ -314,7 +334,7 @@ TIPOS DE INCIDENTE:
 - otro: Otro tipo de problema
 
 REQUIERE: tipo, descripcion, direccion/colonia/alcaldia
-Opcionales: hogares_afectados, duracion
+Opcionales: hogares_afectados, duracion, latitud, longitud
 
 Usa cuando el ciudadano quiera reportar un problema de agua.`,
     parameters: z.object({
@@ -325,10 +345,50 @@ Usa cuando el ciudadano quiera reportar un problema de agua.`,
         colonia: z.string().nullable().optional().describe("Colonia"),
         alcaldia: z.string().nullable().optional().describe("Alcaldia"),
         hogares_afectados: z.number().int().nullable().optional().default(1).describe("Numero de hogares afectados"),
-        duracion: z.string().nullable().optional().describe("Cuanto tiempo lleva el problema (ej: '2 horas', '3 dias')")
+        duracion: z.string().nullable().optional().describe("Cuanto tiempo lleva el problema (ej: '2 horas', '3 dias')"),
+        latitud: z.number().nullable().optional().describe("Latitud si el usuario compartio ubicacion"),
+        longitud: z.number().nullable().optional().describe("Longitud si el usuario compartio ubicacion")
     }),
     execute: async (input) => {
         console.log(`[reportar_incidente] tipo=${input.tipo}, alcaldia=${input.alcaldia}`);
+
+        const supabase = getSupabase();
+        if (supabase) {
+            const texto = [input.descripcion, input.direccion].filter(Boolean).join(". ");
+            const row = {
+                texto,
+                tipo: mapTipoToSupabase(input.tipo),
+                alcaldia: input.alcaldia || null,
+                colonia: input.colonia || null,
+                latitud: input.latitud ?? null,
+                longitud: input.longitud ?? null,
+                tweet_id: null,
+                username: null,
+                user_name: null
+            };
+            try {
+                const { data, error } = await supabase.from("quejas").insert(row).select("id").single();
+                if (error) {
+                    console.error(`[reportar_incidente] Supabase error:`, error);
+                    return {
+                        success: false,
+                        error: `No se pudo guardar el reporte: ${error.message}`
+                    };
+                }
+                return {
+                    success: true,
+                    incidente_id: data?.id,
+                    estado: "reportado",
+                    message: `Reporte guardado. Tu voz se vera en el mapa. ID: ${data?.id ?? "ok"}.`
+                };
+            } catch (e) {
+                console.error(`[reportar_incidente] Error:`, e);
+                return {
+                    success: false,
+                    error: `No se pudo reportar el incidente: ${e instanceof Error ? e.message : "Error desconocido"}`
+                };
+            }
+        }
 
         const payload = {
             tipo: input.tipo,
@@ -356,7 +416,7 @@ Usa cuando el ciudadano quiera reportar un problema de agua.`,
             console.error(`[reportar_incidente] Request payload (for backend debug):`, JSON.stringify(payload));
             return {
                 success: false,
-                error: `No se pudo reportar el incidente: ${error instanceof Error ? error.message : 'Error desconocido'}`
+                error: `No se pudo reportar el incidente: ${error instanceof Error ? error.message : "Error desconocido"}`
             };
         }
     }
@@ -378,8 +438,44 @@ Usa cuando el ciudadano quiera saber si hay problemas de agua reportados en su z
     execute: async ({ alcaldia, tipo }) => {
         console.log(`[consultar_incidentes] alcaldia=${alcaldia}, tipo=${tipo}`);
 
+        const supabase = getSupabase();
+        if (supabase) {
+            try {
+                let query = supabase.from("quejas").select("id, texto, tipo, alcaldia, colonia, latitud, longitud, created_at").order("created_at", { ascending: false }).limit(10);
+                if (alcaldia) query = query.eq("alcaldia", alcaldia);
+                if (tipo) query = query.eq("tipo", mapTipoToSupabase(tipo));
+                const { data: rows, error } = await query;
+                if (error) {
+                    console.error(`[consultar_incidentes] Supabase error:`, error);
+                    return { success: false, error: error.message };
+                }
+                const incidentes = (rows || []).map((r: { id: number; texto: string; tipo: string; alcaldia: string | null; colonia: string | null; latitud: number | null; longitud: number | null; created_at: string }) => ({
+                    id: String(r.id),
+                    tipo: r.tipo,
+                    estado: "reportado",
+                    descripcion: r.texto,
+                    alcaldia: r.alcaldia,
+                    colonia: r.colonia,
+                    latitud: r.latitud,
+                    longitud: r.longitud,
+                    creado_en: r.created_at
+                }));
+                return {
+                    success: true,
+                    incidentes,
+                    estadisticas: { total: incidentes.length },
+                    count: incidentes.length
+                };
+            } catch (e) {
+                console.error(`[consultar_incidentes] Error:`, e);
+                return {
+                    success: false,
+                    error: e instanceof Error ? e.message : "Error desconocido"
+                };
+            }
+        }
+
         try {
-            // Get both incidents and statistics
             const params = new URLSearchParams();
             if (alcaldia) params.set("alcaldia", alcaldia);
             if (tipo) params.set("tipo", tipo);
