@@ -159,27 +159,43 @@ async function transcribeAudio(buffer: ArrayBuffer, mimeType?: string): Promise<
 async function getAudioBufferFromMessage(
     audioMsg: { url?: string; directUrl?: string; base64?: string },
     evolutionUrl?: string,
-    evolutionKey?: string
+    evolutionKey?: string,
+    requestId?: string
 ): Promise<ArrayBuffer | null> {
     if (audioMsg.base64) {
         try {
             const bin = Buffer.from(audioMsg.base64, "base64");
-            return bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength);
-        } catch {
+            const buf = bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength);
+            if (requestId) console.log(`[${requestId}] [Evolution] audio from base64, size=${bin.length}`);
+            return buf as ArrayBuffer;
+        } catch (e) {
+            if (requestId) console.warn(`[${requestId}] [Evolution] audio base64 decode failed:`, e);
             return null;
         }
     }
-    const url = audioMsg.url || audioMsg.directUrl;
-    if (!url) return null;
+    let url = audioMsg.url || audioMsg.directUrl || "";
+    if (!url) {
+        if (requestId) console.warn(`[${requestId}] [Evolution] audio: no base64, no url/directUrl`);
+        return null;
+    }
+    if (evolutionUrl && url.startsWith("/")) {
+        url = evolutionUrl.replace(/\/$/, "") + url;
+    }
     try {
         const headers: Record<string, string> = {};
         if (evolutionKey && evolutionUrl && url.startsWith(evolutionUrl)) {
             headers.apikey = evolutionKey;
         }
         const res = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
-        if (!res.ok) return null;
-        return await res.arrayBuffer();
-    } catch {
+        if (!res.ok) {
+            if (requestId) console.warn(`[${requestId}] [Evolution] audio fetch failed: ${res.status} ${url.substring(0, 60)}`);
+            return null;
+        }
+        const buf = await res.arrayBuffer();
+        if (requestId) console.log(`[${requestId}] [Evolution] audio from url, size=${buf.byteLength}`);
+        return buf;
+    } catch (e) {
+        if (requestId) console.warn(`[${requestId}] [Evolution] audio fetch error:`, e);
         return null;
     }
 }
@@ -475,19 +491,23 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
             console.log(`[${requestId}] [Evolution] location parsed -> input: "${locationText.substring(0, 80)}..."`);
         }
 
-        const audioMsg = msg?.audioMessage ?? msg?.pttMessage;
-        if (audioMsg) {
+        const audioMsg = (msg as Record<string, unknown>)?.audioMessage
+            ?? (msg as Record<string, unknown>)?.pttMessage
+            ?? (msg as Record<string, unknown>)?.audio;
+        if (audioMsg && typeof audioMsg === "object" && audioMsg !== null) {
+            const am = audioMsg as { url?: string; directUrl?: string; base64?: string; mimetype?: string };
             const evolutionUrl = process.env.EVOLUTION_API_URL || "";
             const evolutionKey = process.env.EVOLUTION_API_KEY || "";
-            const buffer = await getAudioBufferFromMessage(audioMsg, evolutionUrl, evolutionKey);
+            console.log(`[${requestId}] [Evolution] audio message: hasBase64=${!!am.base64}, hasUrl=${!!(am.url || am.directUrl)}`);
+            const buffer = await getAudioBufferFromMessage(am, evolutionUrl, evolutionKey, requestId);
             if (buffer) {
-                const transcription = await transcribeAudio(buffer, audioMsg.mimetype);
-                const audioLabel = msg?.pttMessage ? "nota de voz" : "audio";
+                const transcription = await transcribeAudio(buffer, am.mimetype);
+                if (requestId) console.log(`[${requestId}] [Evolution] Whisper: ${transcription ? "ok " + transcription.length + " chars" : "failed"}`);
+                const audioLabel = (msg as Record<string, unknown>)?.pttMessage ? "nota de voz" : "audio";
                 const transcribed = transcription
                     ? `[El usuario envió un ${audioLabel}:] ${transcription}`
                     : `[El usuario envió un ${audioLabel}. No se pudo transcribir.]`;
                 messageText = messageText ? `${messageText}\n${transcribed}` : transcribed;
-                console.log(`[${requestId}] [Evolution] audio transcribed (${transcription?.length ?? 0} chars)`);
             } else {
                 const fallback = "[El usuario envió un audio. No se pudo obtener el archivo.]";
                 messageText = messageText ? `${messageText}\n${fallback}` : fallback;
