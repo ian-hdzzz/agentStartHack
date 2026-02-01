@@ -1,5 +1,5 @@
 // ============================================
-// CEA Agent Server - Production Ready v2.0
+// AquaHub Agent Server - Citizen Assistance v2.0
 // ============================================
 
 import express, { Request, Response, NextFunction } from "express";
@@ -21,7 +21,7 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const requiredEnvVars = ["OPENAI_API_KEY"];
 for (const envVar of requiredEnvVars) {
     if (!process.env[envVar]) {
-        console.error(`❌ Missing required environment variable: ${envVar}`);
+        console.error(`Missing required environment variable: ${envVar}`);
         process.exit(1);
     }
 }
@@ -40,15 +40,14 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     const requestId = crypto.randomUUID().substring(0, 8);
     (req as any).requestId = requestId;
     (req as any).startTime = Date.now();
-    
-    console.log(`→ [${requestId}] ${req.method} ${req.path}`);
-    
-    // Log response when finished
+
+    console.log(`-> [${requestId}] ${req.method} ${req.path}`);
+
     res.on("finish", () => {
         const duration = Date.now() - (req as any).startTime;
-        console.log(`← [${requestId}] ${res.statusCode} (${duration}ms)`);
+        console.log(`<- [${requestId}] ${res.statusCode} (${duration}ms)`);
     });
-    
+
     next();
 });
 
@@ -57,7 +56,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    
+
     if (req.method === "OPTIONS") {
         return res.sendStatus(200);
     }
@@ -68,7 +67,6 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // Health & Status Endpoints
 // ============================================
 
-// Basic health check (for load balancers)
 app.get("/health", (req: Request, res: Response) => {
     res.json({
         status: "ok",
@@ -77,10 +75,9 @@ app.get("/health", (req: Request, res: Response) => {
     });
 });
 
-// Detailed status (for monitoring)
 app.get("/status", (req: Request, res: Response) => {
     const agentHealth = getAgentHealth();
-    
+
     res.json({
         status: "ok",
         version: "2.0.0",
@@ -101,12 +98,11 @@ app.get("/status", (req: Request, res: Response) => {
 
 async function handleChat(req: Request, res: Response): Promise<void> {
     const requestId = (req as any).requestId || crypto.randomUUID().substring(0, 8);
-    
-    try {
-        // Extract request data (conversationId is the Chatwoot conversation ID)
-        let { message, conversationId, contactId, metadata } = req.body as ChatRequest;
 
-        // Sanitize message input - handle arrays or stringified arrays
+    try {
+        let { message, conversationId, metadata } = req.body as ChatRequest;
+
+        // Sanitize message input
         if (Array.isArray(message)) {
             message = message[0] || "";
         } else if (typeof message === "string" && message.startsWith("[") && message.endsWith("]")) {
@@ -120,7 +116,6 @@ async function handleChat(req: Request, res: Response): Promise<void> {
             }
         }
 
-        // Validate request
         if (!message || typeof message !== "string") {
             res.status(400).json({
                 error: "Missing or invalid 'message' field",
@@ -129,7 +124,7 @@ async function handleChat(req: Request, res: Response): Promise<void> {
             } as ChatResponse);
             return;
         }
-        
+
         if (message.length > 10000) {
             res.status(400).json({
                 error: "Message too long (max 10000 characters)",
@@ -138,19 +133,15 @@ async function handleChat(req: Request, res: Response): Promise<void> {
             } as ChatResponse);
             return;
         }
-        
+
         console.log(`[${requestId}] Processing: "${message.substring(0, 100)}${message.length > 100 ? '...' : ''}"`);
-        
-        // Run the agent workflow
-        // conversationId from Chatwoot is numeric - we use it as both the conversation tracker and Chatwoot link
+
         const result = await runWorkflow({
             input_as_text: message,
             conversationId: conversationId,
-            contactId: contactId,
             metadata: metadata
         });
-        
-        // Build response
+
         const response: ChatResponse = {
             response: result.output_text || "Lo siento, no pude procesar tu mensaje.",
             classification: result.classification,
@@ -160,22 +151,17 @@ async function handleChat(req: Request, res: Response): Promise<void> {
                 processingTimeMs: Date.now() - (req as any).startTime
             }
         };
-        
-        // Include ticket folio if created
-        if (result.ticketFolio) {
-            response.ticketFolio = result.ticketFolio;
-        }
-        
+
         console.log(`[${requestId}] Classification: ${result.classification}`);
         console.log(`[${requestId}] Response length: ${response.response.length} chars`);
-        
+
         res.json(response);
-        
+
     } catch (error) {
         console.error(`[${requestId}] Error:`, error);
-        
+
         const errorMessage = error instanceof Error ? error.message : "Internal server error";
-        
+
         res.status(500).json({
             error: NODE_ENV === "development" ? errorMessage : "Internal server error",
             response: "Lo siento, hubo un error procesando tu mensaje. Por favor intenta de nuevo.",
@@ -191,11 +177,11 @@ async function handleChat(req: Request, res: Response): Promise<void> {
 // Main chat endpoint
 app.post("/api/chat", handleChat);
 
-// Webhook alias (for n8n integration)
+// Webhook alias (for integrations)
 app.post("/webhook", handleChat);
 
 // ============================================
-// Evolution API Webhook Handler
+// Evolution API Webhook Handler (WhatsApp)
 // ============================================
 
 interface EvolutionWebhook {
@@ -247,19 +233,16 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
     try {
         const payload = req.body as EvolutionWebhook;
 
-        // Only process incoming messages
         if (payload.event !== "messages.upsert") {
             res.json({ status: "ignored", reason: "not a message event" });
             return;
         }
 
-        // Ignore messages from self
         if (payload.data?.key?.fromMe) {
             res.json({ status: "ignored", reason: "message from self" });
             return;
         }
 
-        // Extract message text
         const messageText = payload.data?.message?.conversation ||
                            payload.data?.message?.extendedTextMessage?.text || "";
 
@@ -273,7 +256,6 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
 
         console.log(`[${requestId}] Evolution webhook from ${remoteJid}: "${messageText.substring(0, 50)}..."`);
 
-        // Process with agent
         const result = await runWorkflow({
             input_as_text: messageText,
             conversationId: remoteJid,
@@ -284,7 +266,6 @@ app.post("/webhook/evolution", async (req: Request, res: Response): Promise<void
             }
         });
 
-        // Send response back via WhatsApp
         if (result.output_text) {
             await sendWhatsAppMessage(instance, remoteJid, result.output_text);
         }
@@ -310,7 +291,6 @@ app.post("/chat", handleChat);
 // Error Handling
 // ============================================
 
-// 404 handler
 app.use((req: Request, res: Response) => {
     res.status(404).json({
         error: "Not found",
@@ -319,19 +299,18 @@ app.use((req: Request, res: Response) => {
             "GET /health - Health check",
             "GET /status - Detailed status",
             "POST /api/chat - Main chat endpoint",
-            "POST /webhook - Webhook endpoint (n8n)",
-            "POST /webhook/evolution - Evolution API webhook"
+            "POST /webhook - Webhook endpoint",
+            "POST /webhook/evolution - Evolution API webhook (WhatsApp)"
         ]
     });
 });
 
-// Global error handler
 app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
     console.error("Unhandled error:", error);
-    
+
     res.status(500).json({
         error: NODE_ENV === "development" ? error.message : "Internal server error",
-        response: "Lo siento, ocurrió un error inesperado.",
+        response: "Lo siento, ocurrio un error inesperado.",
         conversationId: crypto.randomUUID()
     });
 });
@@ -342,33 +321,32 @@ app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
 
 const server = app.listen(PORT, () => {
     console.log(`
-╔════════════════════════════════════════════════════════╗
-║                CEA Agent Server v2.0                   ║
-╠════════════════════════════════════════════════════════╣
-║  🚀 Running on port ${PORT}                               ║
-║  📍 Health: http://localhost:${PORT}/health               ║
-║  📊 Status: http://localhost:${PORT}/status               ║
-║  💬 Chat:   http://localhost:${PORT}/api/chat             ║
-║  🔗 Webhook: http://localhost:${PORT}/webhook             ║
-╠════════════════════════════════════════════════════════╣
-║  Environment: ${NODE_ENV.padEnd(39)}║
-╚════════════════════════════════════════════════════════╝
+========================================
+  AquaHub Agent Server v2.0
+========================================
+  Running on port ${PORT}
+  Health: http://localhost:${PORT}/health
+  Status: http://localhost:${PORT}/status
+  Chat:   http://localhost:${PORT}/api/chat
+  Webhook: http://localhost:${PORT}/webhook
+  Environment: ${NODE_ENV}
+========================================
     `);
 });
 
 // Graceful shutdown
 process.on("SIGTERM", () => {
-    console.log("\n🛑 SIGTERM received, shutting down gracefully...");
+    console.log("\nSIGTERM received, shutting down gracefully...");
     server.close(() => {
-        console.log("✅ Server closed");
+        console.log("Server closed");
         process.exit(0);
     });
 });
 
 process.on("SIGINT", () => {
-    console.log("\n🛑 SIGINT received, shutting down gracefully...");
+    console.log("\nSIGINT received, shutting down gracefully...");
     server.close(() => {
-        console.log("✅ Server closed");
+        console.log("Server closed");
         process.exit(0);
     });
 });

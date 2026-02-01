@@ -1,26 +1,22 @@
 // ============================================
-// CEA Agent System - Production Ready v2.0
+// AquaHub Agent System - Citizen Assistance v2.0
 // ============================================
 
 import { Agent, AgentInputItem, Runner, withTrace } from "@openai/agents";
 import { z } from "zod";
 import type { WorkflowInput, WorkflowOutput, Classification } from "./types.js";
 import {
-    getDeudaTool,
-    getConsumoTool,
-    getContratoTool,
-    createTicketTool,
-    getClientTicketsTool,
-    searchCustomerByContractTool,
-    updateTicketTool,
-    generateTicketFolio,
-    getMexicoDate,
-    createTicketDirect
+    listarProveedoresTool,
+    crearPedidoTool,
+    consultarPedidoTool,
+    listarPedidosTool,
+    reportarIncidenteTool,
+    consultarIncidentesTool,
+    consultarAlertasTool,
+    consultarPrediccionTool,
+    cancelarPedidoTool,
+    getMexicoDate
 } from "./tools.js";
-import { runWithChatwootContext, getCurrentChatwootContext, type ChatwootContext } from "./context.js";
-
-// Re-export for external use
-export { getCurrentChatwootContext };
 
 // ============================================
 // Configuration
@@ -39,12 +35,9 @@ const MODELS = {
 interface ConversationEntry {
     history: AgentInputItem[];
     lastAccess: Date;
-    contractNumber?: string;
     classification?: Classification;
-    // Chatwoot integration fields for linking tickets
-    chatwootConversationId?: number;
-    chatwootContactId?: number;
-    chatwootInboxId?: number;
+    ciudadanoNombre?: string;
+    alcaldia?: string;
 }
 
 const conversationStore = new Map<string, ConversationEntry>();
@@ -57,7 +50,7 @@ setInterval(() => {
             conversationStore.delete(id);
         }
     }
-}, 300000); // Check every 5 minutes
+}, 300000);
 
 function getConversation(id: string): ConversationEntry {
     const existing = conversationStore.get(id);
@@ -65,7 +58,7 @@ function getConversation(id: string): ConversationEntry {
         existing.lastAccess = new Date();
         return existing;
     }
-    
+
     const newEntry: ConversationEntry = {
         history: [],
         lastAccess: new Date()
@@ -80,16 +73,16 @@ function getConversation(id: string): ConversationEntry {
 
 const ClassificationSchema = z.object({
     classification: z.enum([
-        "fuga",
-        "pagos",
+        "pedir_agua",
+        "reportar_incidente",
+        "consultar_pedido",
+        "alertas",
+        "proveedores",
         "hablar_asesor",
-        "informacion",
-        "consumos",
-        "contrato",
-        "tickets"
+        "informacion"
     ]),
     confidence: z.number().min(0).max(1).nullable().describe("Confidence score for classification (optional)"),
-    extractedContract: z.string().nullable().describe("Extracted contract number if found (optional)")
+    extractedAlcaldia: z.string().nullable().describe("Alcaldia extraida del mensaje si se menciona (optional)")
 });
 
 // ============================================
@@ -105,8 +98,8 @@ function buildSystemContext(): string {
         day: 'numeric'
     });
     const timeStr = now.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
-    
-    return `[Fecha: ${dateStr}, Hora: ${timeStr} (hora de Querétaro)]`;
+
+    return `[Fecha: ${dateStr}, Hora: ${timeStr} (hora de Ciudad de Mexico)]`;
 }
 
 // ============================================
@@ -114,29 +107,29 @@ function buildSystemContext(): string {
 // ============================================
 
 const classificationAgent = new Agent({
-    name: "Clasificador María",
+    name: "Clasificador AquaHub",
     model: MODELS.CLASSIFIER,
-    instructions: `Eres el clasificador de intenciones para CEA Querétaro. Tu trabajo es categorizar cada mensaje.
+    instructions: `Eres el clasificador de intenciones para AquaHub, la plataforma de coordinacion de servicios de agua durante escasez en CDMX. Tu trabajo es categorizar cada mensaje del ciudadano.
 
-CATEGORÍAS:
-- "fuga": Fugas de agua, inundaciones, falta de servicio, emergencias
-- "pagos": Consultar saldo, deuda, cómo pagar, dónde pagar, recibo digital
-- "consumos": Consultar consumo, historial de lecturas, medidor
-- "contrato": Nuevo contrato, cambio de titular, datos del contrato
-- "tickets": Ver estado de tickets, dar seguimiento a reportes
-- "hablar_asesor": Solicitar hablar con una persona real
-- "informacion": Todo lo demás (horarios, oficinas, trámites, saludos, etc.)
+CATEGORIAS:
+- "pedir_agua": Quiere solicitar/pedir agua, ordenar una pipa, necesita agua en su hogar
+- "reportar_incidente": Quiere reportar un problema: fuga, falta de agua, contaminacion, daño de infraestructura
+- "consultar_pedido": Quiere saber el estado de un pedido que ya hizo, rastrear su pipa
+- "alertas": Pregunta por alertas, avisos, emergencias, situacion del agua, noticias sobre escasez
+- "proveedores": Quiere ver proveedores disponibles, comparar precios, buscar pipas cercanas
+- "hablar_asesor": Solicita hablar con una persona real, asesor humano
+- "informacion": Todo lo demas (saludos, preguntas generales, como funciona AquaHub, subsidios, etc.)
 
 REGLAS:
-1. Si menciona "fuga", "no hay agua", "inundación" → fuga
-2. Si menciona "deuda", "saldo", "pagar", "recibo digital" → pagos  
-3. Si menciona "consumo", "lectura", "medidor", "cuánta agua" → consumos
-4. Si menciona "contrato", "nuevo servicio", "cambio de nombre" → contrato
-5. Si pregunta por estado de un reporte o ticket → tickets
-6. Si quiere "hablar con alguien", "asesor", "persona real" → hablar_asesor
-7. Saludos simples como "hola" sin más contexto → informacion
+1. Si menciona "pedir agua", "necesito agua", "quiero una pipa", "ordenar agua" -> pedir_agua
+2. Si menciona "fuga", "no hay agua", "contaminada", "tuberia rota", "reportar" -> reportar_incidente
+3. Si menciona "mi pedido", "estado de mi orden", "donde esta mi pipa", "rastrear" -> consultar_pedido
+4. Si menciona "alertas", "avisos", "emergencia", "escasez", "situacion del agua" -> alertas
+5. Si menciona "proveedores", "pipas disponibles", "precios", "cual es mas barato" -> proveedores
+6. Si quiere "hablar con alguien", "asesor", "persona real" -> hablar_asesor
+7. Saludos simples como "hola" sin mas contexto -> informacion
 
-Si detectas un número de contrato (6+ dígitos), extráelo en extractedContract.`,
+Si detectas una alcaldia de CDMX, extraela en extractedAlcaldia.`,
     outputType: ClassificationSchema,
     modelSettings: {
         temperature: 0.3,
@@ -149,52 +142,49 @@ Si detectas un número de contrato (6+ dígitos), extráelo en extractedContract
 // ============================================
 
 const informacionAgent = new Agent({
-    name: "María - Información",
+    name: "AquaHub - Informacion",
     model: MODELS.INFO,
-    instructions: `Eres María, asistente virtual de la CEA Querétaro. 
+    instructions: `Eres el asistente virtual de AquaHub, la plataforma de coordinacion de servicios de agua durante la crisis hidrica en la Ciudad de Mexico.
 
-Tu rol es responder preguntas generales sobre servicios CEA.
+Tu rol es responder preguntas generales sobre los servicios de AquaHub.
 
 ESTILO:
-- Tono cálido y profesional
+- Tono calido y profesional
 - Respuestas cortas y directas
-- Máximo 1 pregunta por respuesta
-- Usa máximo 1 emoji por mensaje (💧 preferido)
+- Maximo 1 pregunta por respuesta
 
-SI PREGUNTAN "¿QUÉ PUEDES HACER?":
-"Soy María, tu asistente de la CEA 💧 Puedo ayudarte con:
-• Consultar tu saldo y pagos
-• Ver tu historial de consumo
-• Reportar fugas
-• Dar seguimiento a tus tickets
-• Información de trámites y oficinas"
+SI PREGUNTAN "QUE PUEDES HACER?" o "COMO FUNCIONA?":
+"Soy tu asistente de AquaHub. Puedo ayudarte con:
+- Pedir agua (pipas) a proveedores certificados
+- Reportar problemas de agua (fugas, falta de servicio, contaminacion)
+- Consultar el estado de tus pedidos
+- Ver proveedores disponibles y comparar precios
+- Consultar alertas y avisos sobre la situacion del agua
+- Informacion sobre programas de subsidio"
 
-INFORMACIÓN DE PAGOS:
-- Pagar en línea en cea.gob.mx
-- Bancos y Oxxo con el recibo
-- Oficinas CEA
-- Los pagos pueden tardar 48 hrs en reflejarse
+SOBRE AQUAHUB:
+- Plataforma que conecta ciudadanos con proveedores de agua (pipas) durante la escasez
+- Permite reportar incidentes de agua para que el gobierno los atienda
+- Ofrece predicciones de demanda por alcaldia
+- Tiene programas de subsidio para comunidades vulnerables
+- Funciona en toda la Ciudad de Mexico
 
-OFICINAS CEA:
-- Horario: Lunes a Viernes 8:00-16:00
-- Oficina central: Centro, Querétaro
+PROGRAMAS DE SUBSIDIO:
+- Existen programas gubernamentales que aplican descuentos en pedidos de agua
+- Los descuentos varian segun la alcaldia y la situacion de escasez
+- Para mas informacion, el ciudadano puede consultar con su alcaldia
 
-CONTRATOS NUEVOS (documentos):
-1. Identificación oficial
-2. Documento de propiedad del predio
-3. Carta poder (si no es el propietario)
-Costo: $175 + IVA
-
-CAMBIO DE TITULAR:
-1. Número de contrato
-2. Documento de propiedad
-3. Identificación oficial
+TIPS DE AHORRO DE AGUA:
+- Reutilizar agua de la lavadora para el WC
+- Reparar fugas domesticas rapidamente
+- Captar agua de lluvia
+- Usar regaderas de bajo flujo
 
 NO debes:
-- Confirmar datos específicos de cuentas
-- Hacer ajustes o descuentos
-- Levantar reportes (eso lo hacen otros agentes)`,
-    tools: [],
+- Inventar datos sobre disponibilidad de agua
+- Prometer tiempos de entrega especificos
+- Dar informacion sobre precios sin consultar proveedores`,
+    tools: [consultarAlertasTool, consultarPrediccionTool],
     modelSettings: {
         temperature: 0.7,
         maxTokens: 512
@@ -202,39 +192,40 @@ NO debes:
 });
 
 // ============================================
-// Pagos Agent (Payments, debt, digital receipt)
+// Pedir Agua Agent (Water ordering)
 // ============================================
 
-const pagosAgent = new Agent({
-    name: "María - Pagos",
+const pedirAguaAgent = new Agent({
+    name: "AquaHub - Pedir Agua",
     model: MODELS.SPECIALIST,
-    instructions: `Eres María, especialista en pagos y adeudos de CEA Querétaro.
+    instructions: `Eres el especialista en pedidos de agua de AquaHub.
 
-FLUJO PARA CONSULTA DE SALDO:
-1. Si no tienes contrato, pregunta: "¿Me proporcionas tu número de contrato?"
-2. Usa get_deuda para obtener el saldo
-3. Presenta el resultado de forma clara
+FLUJO PARA PEDIR AGUA:
+1. Pregunta la alcaldia o colonia del ciudadano
+2. Usa listar_proveedores para mostrar opciones disponibles
+3. Presenta los proveedores con: nombre, calificacion, precio por litro, certificaciones
+4. Pregunta cual proveedor elige y cuantos litros necesita
+5. Pide nombre completo y direccion de entrega
+6. Calcula el precio total (litros x precio_por_litro)
+7. Usa crear_pedido para registrar el pedido
+8. Confirma con el ID del pedido
 
-FLUJO PARA RECIBO DIGITAL:
-1. Pregunta: "¿Me confirmas tu número de contrato y correo electrónico?"
-2. Cuando tengas ambos, crea ticket con create_ticket:
-   - service_type: "recibo_digital"
-   - titulo: "Cambio a recibo digital - Contrato [X]"
-   - descripcion: Incluir contrato y email
-3. Confirma con el folio: "Listo, solicitud registrada con folio [FOLIO]. Tu recibo llegará a [email] 💧"
+FORMATO PARA PRESENTAR PROVEEDORES:
+"Proveedores disponibles en [alcaldia]:
 
-FORMAS DE PAGO:
-- En línea: cea.gob.mx
-- Oxxo: con tu recibo
-- Bancos autorizados
-- Cajeros CEA
-- Oficinas CEA
+1. [Nombre] - [calificacion] estrellas
+   Precio: $[precio]/litro
+   Certificaciones: [lista]
+   Telefono: [tel]
+
+2. [Nombre]..."
 
 IMPORTANTE:
-- Un número de contrato tiene típicamente 6-10 dígitos
-- Siempre confirma el folio cuando crees un ticket
-- Sé conciso, una pregunta a la vez`,
-    tools: [getDeudaTool, getContratoTool, createTicketTool, searchCustomerByContractTool],
+- Pregunta UNA cosa a la vez
+- Confirma los datos antes de crear el pedido
+- Si hay subsidio disponible, mencionalo
+- Si no hay proveedores, sugiere buscar en alcaldias cercanas`,
+    tools: [listarProveedoresTool, crearPedidoTool],
     modelSettings: {
         temperature: 0.5,
         maxTokens: 1024
@@ -242,77 +233,42 @@ IMPORTANTE:
 });
 
 // ============================================
-// Consumos Agent (Consumption history)
+// Reportar Incidente Agent
 // ============================================
 
-const consumosAgent = new Agent({
-    name: "María - Consumos",
+const reportarIncidenteAgent = new Agent({
+    name: "AquaHub - Reportar Incidente",
     model: MODELS.SPECIALIST,
-    instructions: `Eres María, especialista en consumo de agua de CEA Querétaro.
+    instructions: `Eres el especialista en reportes de incidentes de AquaHub.
 
-FLUJO:
-1. Solicita número de contrato si no lo tienes
-2. Usa get_consumo para obtener historial
-3. Presenta los datos claramente
+TIPOS DE INCIDENTE:
+- fuga: Fuga de agua en via publica o tuberia
+- sin_agua: No hay servicio de agua en la zona
+- contaminacion: Agua con color, olor o sabor anormal
+- infraestructura: Daño en tuberias, valvulas, tanques, etc.
+- otro: Cualquier otro problema relacionado con el agua
 
-CÓMO PRESENTAR CONSUMOS:
-"Tu historial de consumo 💧
-• [Mes]: [X] m³
-• [Mes]: [X] m³
-Promedio mensual: [X] m³"
-
-SI EL USUARIO DISPUTA UN CONSUMO:
-1. Recaba: contrato, mes(es) en disputa, descripción del problema
-2. Crea ticket con create_ticket:
-   - service_type: "lecturas" (si es problema de medidor)
-   - service_type: "revision_recibo" (si quiere revisión del recibo)
-3. Confirma con el folio
-
-NOTA: Si el consumo es muy alto, sugiere:
-- Revisar instalaciones internas
-- Verificar si hay fugas en casa
-- Si persiste, abrir un ticket de revisión`,
-    tools: [getConsumoTool, getContratoTool, createTicketTool],
-    modelSettings: {
-        temperature: 0.5,
-        maxTokens: 1024
-    }
-});
-
-// ============================================
-// Fugas Agent (Water leaks)
-// ============================================
-
-const fugasAgent = new Agent({
-    name: "María - Fugas",
-    model: MODELS.SPECIALIST,
-    instructions: `Eres María, especialista en reportes de fugas de CEA Querétaro.
-
-INFORMACIÓN NECESARIA PARA UN REPORTE:
-1. Ubicación exacta (calle, número, colonia, referencias)
-2. Tipo de fuga: vía pública o dentro de propiedad
-3. Gravedad: ¿Es mucha agua? ¿Hay inundación?
+INFORMACION NECESARIA:
+1. Tipo de incidente
+2. Ubicacion (direccion, colonia, alcaldia)
+3. Descripcion del problema
+4. Cuantos hogares estan afectados (aproximado)
+5. Cuanto tiempo lleva el problema
 
 FLUJO:
 - Pregunta UNA cosa a la vez
-- Si te envían foto, úsala para entender la situación
-- Cuando tengas ubicación + tipo + gravedad, crea el ticket
+- Cuando tengas tipo + ubicacion + descripcion, crea el reporte
+- Usa reportar_incidente para registrarlo
 
-CREAR TICKET:
-Usa create_ticket con:
-- service_type: "fuga"
-- titulo: "Fuga en [vía pública/propiedad] - [Colonia]"
-- descripcion: Toda la información recabada
-- ubicacion: La dirección exacta
-- priority: "urgente" si hay inundación, "alta" si es considerable
+RESPUESTA DESPUES DE CREAR:
+"Tu reporte ha sido registrado con el ID [ID].
+El gobierno revisara tu incidente y tomara accion.
+Puedes consultar incidentes activos en tu zona en cualquier momento."
 
-RESPUESTA DESPUÉS DE CREAR:
-"He registrado tu reporte con el folio [FOLIO] 💧
-Un equipo de CEA acudirá a la ubicación lo antes posible."
-
-NO pidas número de contrato para fugas en vía pública.
-SÍ pide contrato si la fuga es dentro de la propiedad.`,
-    tools: [createTicketTool],
+Si el ciudadano reporta una EMERGENCIA (inundacion, contaminacion grave):
+- Registra el incidente con todos los datos disponibles
+- Recomienda llamar a Proteccion Civil si hay riesgo inmediato`,
+    tools: [reportarIncidenteTool, consultarIncidentesTool],
     modelSettings: {
         temperature: 0.5,
         maxTokens: 1024
@@ -320,84 +276,125 @@ SÍ pide contrato si la fuga es dentro de la propiedad.`,
 });
 
 // ============================================
-// Contratos Agent (Contract management)
+// Consultar Pedido Agent
 // ============================================
 
-const contratosAgent = new Agent({
-    name: "María - Contratos",
+const consultarPedidoAgent = new Agent({
+    name: "AquaHub - Consultar Pedido",
     model: MODELS.SPECIALIST,
-    instructions: `Eres María, especialista en contratos de CEA Querétaro.
-
-PARA CONTRATO NUEVO:
-Documentos requeridos:
-1. Identificación oficial
-2. Documento que acredite propiedad del predio
-3. Carta poder simple (si no es el propietario)
-
-Costo: $175 + IVA
-
-Responde: "Para un contrato nuevo necesitas traer a oficinas CEA:
-• Identificación oficial
-• Comprobante de propiedad
-• Carta poder (si aplica)
-El costo es $175 + IVA 💧"
-
-PARA CAMBIO DE TITULAR:
-1. Pregunta el número de contrato actual
-2. Usa get_contract_details para verificar
-3. Indica documentos:
-   - Identificación oficial del nuevo titular
-   - Documento de propiedad a nombre del nuevo titular
-   - El trámite se realiza en oficinas CEA
-
-PARA CONSULTA DE DATOS:
-- Pide el número de contrato
-- Usa get_contract_details
-- Presenta: titular, dirección, estado del servicio`,
-    tools: [getContratoTool, searchCustomerByContractTool],
-    modelSettings: {
-        temperature: 0.5,
-        maxTokens: 1024
-    }
-});
-
-// ============================================
-// Tickets Agent (Ticket tracking)
-// ============================================
-
-const ticketsAgent = new Agent({
-    name: "María - Tickets",
-    model: MODELS.SPECIALIST,
-    instructions: `Eres María, especialista en seguimiento de tickets de CEA Querétaro.
+    instructions: `Eres el especialista en seguimiento de pedidos de AquaHub.
 
 FLUJO:
-1. Solicita número de contrato
-2. Usa get_client_tickets para buscar tickets
-3. Presenta los resultados
+1. Solicita el ID del pedido al ciudadano
+2. Usa consultar_pedido para obtener el estado
+3. Presenta el resultado de forma clara
 
-FORMATO DE PRESENTACIÓN:
-"Encontré [N] ticket(s) para tu contrato 💧
+FORMATO DE PRESENTACION:
+"Estado de tu pedido:
+- ID: [id]
+- Estado: [estado]
+- Cantidad: [litros] litros
+- Precio: $[precio]
+- Direccion: [direccion]
+- Creado: [fecha]"
 
-📋 Ticket: [FOLIO]
-Estado: [status]
-Tipo: [tipo]
-Fecha: [fecha]
-[descripción breve]"
+ESTADOS:
+- pendiente: El proveedor aun no ha aceptado tu pedido
+- aceptado: El proveedor acepto, se esta preparando
+- en_transito: Tu agua esta en camino
+- entregado: Tu pedido fue entregado exitosamente
+- cancelado: El pedido fue cancelado
 
-ESTADOS DE TICKET:
-- abierto: Recién creado
-- en_proceso: Un agente lo está atendiendo
-- esperando_cliente: Necesitamos información tuya
-- resuelto: Ya se atendió
-- cerrado: Caso finalizado
-
-Si el usuario quiere actualizar un ticket, recaba la información y usa update_ticket.
+Si el ciudadano no tiene su ID, usa listar_pedidos para buscar pedidos recientes.
+Si quiere cancelar, usa cancelar_pedido.
 
 IMPORTANTE:
-- NO narres tu proceso de búsqueda ("intentando", "probando")
-- Ve directo al resultado
-- Si no hay tickets: "No encontré tickets activos para este contrato"`,
-    tools: [getClientTicketsTool, searchCustomerByContractTool, updateTicketTool],
+- Ve directo al resultado, no narres el proceso
+- Si no se encuentra el pedido, sugiere verificar el ID`,
+    tools: [consultarPedidoTool, listarPedidosTool, cancelarPedidoTool],
+    modelSettings: {
+        temperature: 0.5,
+        maxTokens: 1024
+    }
+});
+
+// ============================================
+// Proveedores Agent
+// ============================================
+
+const proveedoresAgent = new Agent({
+    name: "AquaHub - Proveedores",
+    model: MODELS.SPECIALIST,
+    instructions: `Eres el especialista en proveedores de agua de AquaHub.
+
+FLUJO:
+1. Pregunta la alcaldia del ciudadano si no la menciono
+2. Usa listar_proveedores para buscar opciones
+3. Presenta los resultados de forma clara y comparativa
+
+FORMATO:
+"Proveedores disponibles en [alcaldia]:
+
+1. [Nombre] - [calificacion] estrellas
+   Precio: $[precio]/litro
+   Flota: [N] unidades
+   Certificaciones: [lista]
+   Contacto: [telefono]
+   Tiempo estimado: [tiempo]
+
+2. ..."
+
+Si el ciudadano quiere pedir agua a un proveedor, guialo para hacerlo:
+- Pregunta cuantos litros necesita
+- Pide nombre y direccion de entrega
+- Calcula el precio (litros x precio_por_litro)
+- Usa crear_pedido
+
+Tambien puedes consultar la prediccion de demanda para informar al ciudadano sobre la situacion en su zona.`,
+    tools: [listarProveedoresTool, crearPedidoTool, consultarPrediccionTool],
+    modelSettings: {
+        temperature: 0.5,
+        maxTokens: 1024
+    }
+});
+
+// ============================================
+// Alertas Agent
+// ============================================
+
+const alertasAgent = new Agent({
+    name: "AquaHub - Alertas",
+    model: MODELS.SPECIALIST,
+    instructions: `Eres el especialista en alertas y situacion del agua de AquaHub.
+
+FLUJO:
+1. Usa consultar_alertas para obtener alertas recientes
+2. Si el ciudadano menciona una alcaldia, usa consultar_prediccion para dar informacion especifica
+3. Presenta las alertas de forma clara
+
+FORMATO ALERTAS:
+"Alertas activas:
+
+[tipo] - [titulo]
+[mensaje]
+Zonas: [zonas]
+Fecha: [fecha]
+
+..."
+
+FORMATO PREDICCION:
+"Situacion del agua en [alcaldia]:
+- Nivel de demanda: [intensidad]
+- Recomendaciones: [lista]"
+
+TIPOS DE ALERTA:
+- escasez: Alertas de escasez de agua
+- conservacion: Tips de ahorro
+- programa: Programas de apoyo/subsidio
+- emergencia: Emergencias hidricas
+
+Si no hay alertas, informa que la situacion es normal y da tips de ahorro de agua.`,
+    tools: [consultarAlertasTool, consultarPrediccionTool, consultarIncidentesTool],
     modelSettings: {
         temperature: 0.5,
         maxTokens: 1024
@@ -409,11 +406,11 @@ IMPORTANTE:
 // ============================================
 
 const agentMap: Record<Classification, Agent<any>> = {
-    fuga: fugasAgent,
-    pagos: pagosAgent,
-    consumos: consumosAgent,
-    contrato: contratosAgent,
-    tickets: ticketsAgent,
+    pedir_agua: pedirAguaAgent,
+    reportar_incidente: reportarIncidenteAgent,
+    consultar_pedido: consultarPedidoAgent,
+    alertas: alertasAgent,
+    proveedores: proveedoresAgent,
     informacion: informacionAgent,
     hablar_asesor: informacionAgent // Handled specially
 };
@@ -430,7 +427,6 @@ async function runAgentWithApproval(
     const result = await runner.run(agent, history);
     const toolsUsed: string[] = [];
 
-    // Extract tool usage from new items
     for (const item of result.newItems) {
         const rawItem = (item as any).rawItem || item;
         if (rawItem.type === "hosted_tool_call" && rawItem.name) {
@@ -438,11 +434,9 @@ async function runAgentWithApproval(
         }
     }
 
-    // Extract output
     let output = result.finalOutput;
 
     if (!output) {
-        // Try to find last assistant message
         for (let i = result.newItems.length - 1; i >= 0; i--) {
             const rawItem = (result.newItems[i] as any).rawItem || result.newItems[i];
             if (rawItem.role === 'assistant' && rawItem.content) {
@@ -457,7 +451,6 @@ async function runAgentWithApproval(
         }
     }
 
-    // Collect new items for history
     const newItems = result.newItems.map((item: any) => (item as any).rawItem || item);
 
     return { output: output || '', newItems, toolsUsed };
@@ -471,146 +464,105 @@ export async function runWorkflow(input: WorkflowInput): Promise<WorkflowOutput>
     const startTime = Date.now();
     const conversationId = input.conversationId || crypto.randomUUID();
 
-    // Extract Chatwoot context for linking tickets
-    // conversationId from Chatwoot is passed as string but may be numeric
-    const chatwootConversationId = input.conversationId ? parseInt(input.conversationId, 10) : undefined;
-    const chatwootContext: ChatwootContext = {
-        conversationId: !isNaN(chatwootConversationId!) ? chatwootConversationId : undefined,
-        contactId: input.contactId
-    };
+    return await withTrace("AquaHub-Agent-v2", async () => {
+        console.log(`\n========== WORKFLOW START ==========`);
+        console.log(`ConversationId: ${conversationId}`);
+        console.log(`Input: "${input.input_as_text}"`);
 
-    if (chatwootContext.conversationId || chatwootContext.contactId) {
-        console.log(`[Workflow] Chatwoot context: conversation=${chatwootContext.conversationId}, contact=${chatwootContext.contactId}`);
-    }
+        const conversation = getConversation(conversationId);
 
-    // Run workflow within Chatwoot context so tools can access it
-    return await runWithChatwootContext(chatwootContext, async () => {
-        return await withTrace("María-CEA-v2", async () => {
-            console.log(`\n========== WORKFLOW START ==========`);
-            console.log(`ConversationId: ${conversationId}`);
-            console.log(`Input: "${input.input_as_text}"`);
+        const contextualInput = `${buildSystemContext()}\n${input.input_as_text}`;
 
-            // Get or create conversation
-            const conversation = getConversation(conversationId);
-
-            // Store Chatwoot IDs in conversation for persistence
-            if (chatwootContext.conversationId) conversation.chatwootConversationId = chatwootContext.conversationId;
-            if (chatwootContext.contactId) conversation.chatwootContactId = chatwootContext.contactId;
-
-            // Build context-enhanced input
-            const contextualInput = `${buildSystemContext()}\n${input.input_as_text}`;
-        
-        // Add user message to history
         const userMessage: AgentInputItem = {
             role: "user",
             content: [{ type: "input_text", text: contextualInput }]
         };
-        
+
         const workingHistory: AgentInputItem[] = [...conversation.history, userMessage];
         const toolsUsed: string[] = [];
-        
-        // Create runner
+
         const runner = new Runner({
             traceMetadata: {
-                __trace_source__: "cea-agent-v2",
+                __trace_source__: "aquahub-agent-v2",
                 conversation_id: conversationId
             }
         });
-        
+
         try {
             // Step 1: Classification
             console.log(`[Workflow] Running classification...`);
             const classificationResult = await runner.run(classificationAgent, workingHistory);
-            
+
             if (!classificationResult.finalOutput) {
                 throw new Error("Classification failed - no output");
             }
-            
+
             const classification = classificationResult.finalOutput.classification as Classification;
-            const extractedContract = classificationResult.finalOutput.extractedContract;
-            
+            const extractedAlcaldia = classificationResult.finalOutput.extractedAlcaldia;
+
             console.log(`[Workflow] Classification: ${classification}`);
-            if (extractedContract) {
-                console.log(`[Workflow] Extracted contract: ${extractedContract}`);
-                conversation.contractNumber = extractedContract;
+            if (extractedAlcaldia) {
+                console.log(`[Workflow] Extracted alcaldia: ${extractedAlcaldia}`);
+                conversation.alcaldia = extractedAlcaldia;
             }
-            
-            // Save classification to conversation
+
             conversation.classification = classification;
-            
+
             let output: string;
             let newItems: AgentInputItem[] = [];
-            
+
             // Step 2: Handle special case - hablar_asesor
             if (classification === "hablar_asesor") {
-                console.log(`[Workflow] Creating urgent ticket for human advisor`);
-
-                // Create ticket and wait for it (to get proper folio)
-                const ticketResult = await createTicketDirect({
-                    service_type: "urgente",
-                    titulo: "Solicitud de contacto con asesor humano",
-                    descripcion: `El usuario solicitó hablar con un asesor humano. Mensaje original: ${input.input_as_text}`,
-                    contract_number: conversation.contractNumber || null,
-                    email: null,
-                    ubicacion: null,
-                    priority: "urgente"
-                });
-
-                const folio = ticketResult.folio || "PENDING";
-                output = `He creado tu solicitud con el folio ${folio}. Te conectaré con un asesor humano. Por favor espera un momento 💧`;
-
-                toolsUsed.push("create_ticket");
-
+                console.log(`[Workflow] Citizen requesting human advisor`);
+                output = `Entiendo que deseas hablar con una persona. Por favor contacta nuestra linea de atencion ciudadana o visita la oficina de tu alcaldia para atencion personalizada. Mientras tanto, puedo ayudarte con informacion sobre proveedores de agua, reportar incidentes o consultar alertas.`;
             } else {
                 // Step 3: Route to specialized agent
                 const selectedAgent = agentMap[classification];
                 console.log(`[Workflow] Routing to: ${selectedAgent.name}`);
-                
+
                 const agentResult = await runAgentWithApproval(runner, selectedAgent, workingHistory);
-                
+
                 output = agentResult.output;
                 newItems = agentResult.newItems;
                 toolsUsed.push(...agentResult.toolsUsed);
             }
-            
+
             // Step 4: Update conversation history
             conversation.history.push(userMessage);
             if (newItems.length > 0) {
                 conversation.history.push(...newItems);
             } else if (output) {
-                // Add assistant response to history
                 conversation.history.push({
                     role: "assistant",
                     content: [{ type: "output_text", text: output }]
                 } as any);
             }
-            
+
             // Limit history length (keep last 20 messages)
             if (conversation.history.length > 20) {
                 conversation.history = conversation.history.slice(-20);
             }
-            
+
             const processingTime = Date.now() - startTime;
             console.log(`[Workflow] Complete in ${processingTime}ms`);
             console.log(`[Workflow] Output: "${output.substring(0, 100)}..."`);
             console.log(`========== WORKFLOW END ==========\n`);
-            
+
             return {
                 output_text: output,
                 classification,
                 toolsUsed
             };
-            
+
         } catch (error) {
             console.error(`[Workflow] Error:`, error);
 
             return {
-                output_text: "Lo siento, tuve un problema procesando tu mensaje. ¿Podrías intentar de nuevo? 💧",
+                output_text: "Lo siento, tuve un problema procesando tu mensaje. Podrias intentar de nuevo?",
                 error: error instanceof Error ? error.message : "Unknown error",
                 toolsUsed
             };
         }
-        });
     });
 }
 
@@ -624,11 +576,11 @@ export function getAgentHealth(): { status: string; agents: string[]; conversati
         agents: [
             classificationAgent.name,
             informacionAgent.name,
-            pagosAgent.name,
-            consumosAgent.name,
-            fugasAgent.name,
-            contratosAgent.name,
-            ticketsAgent.name
+            pedirAguaAgent.name,
+            reportarIncidenteAgent.name,
+            consultarPedidoAgent.name,
+            proveedoresAgent.name,
+            alertasAgent.name
         ],
         conversationCount: conversationStore.size
     };

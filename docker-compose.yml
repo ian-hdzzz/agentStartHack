@@ -1,5 +1,5 @@
 # ============================================
-# CEA Agent Server - Docker Compose for Testing
+# AquaHub Agent Server - Docker Compose
 # ============================================
 #
 # Usage:
@@ -7,41 +7,27 @@
 #   docker-compose up --build -d     # Build and start in background
 #   docker-compose logs -f           # Follow logs
 #   docker-compose down              # Stop and remove
-#
-# This connects to the existing AGORA (Chatwoot) PostgreSQL database
-# on the easypanel-whisper-api swarm network.
 
 services:
-  cea-agent:
+  aquahub-agent:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: cea-agent-v2
+    container_name: aquahub-agent
     restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      # OpenAI Configuration
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
-      # CEA API Proxy (optional - for CEA SOAP calls)
-      - CEA_PROXY_URL=${CEA_PROXY_URL:-}
-      # PostgreSQL - AGORA Database
-      - PGHOST=${PGHOST:-136.107.45.255}
-      - PGPORT=${PGPORT:-5432}
-      - PGUSER=${PGUSER:-postgres}
-      - PGPASSWORD=${PGPASSWORD}
-      - PGDATABASE=${PGDATABASE:-agora_production}
-      - PGPOOL_MAX=${PGPOOL_MAX:-10}
-      # Agent Configuration
-      - AGENT_ACCOUNT_ID=${AGENT_ACCOUNT_ID:-1}
-      # Evolution API
+      # AquaHub API - apunta al backend FastAPI
+      - AQUAHUB_API_URL=${AQUAHUB_API_URL:-http://host.docker.internal:8000}
+      # Evolution API (WhatsApp)
       - EVOLUTION_API_URL=${EVOLUTION_API_URL:-https://evolution.whoopflow.com}
       - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
-    networks:
-      - easypanel-whisper-api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
       interval: 30s
@@ -56,7 +42,3 @@ services:
         reservations:
           cpus: '0.25'
           memory: 128M
-
-networks:
-  easypanel-whisper-api:
-    external: true

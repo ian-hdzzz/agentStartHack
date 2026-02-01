@@ -1,35 +1,26 @@
 // ============================================
-// Chatwoot Context - For linking tickets to conversations
+// AquaHub Context - Placeholder for future use
 // ============================================
-// This module uses AsyncLocalStorage to provide conversation context
-// to tools without passing it explicitly through the call chain.
+// This module can be used to store per-request context
+// (e.g., citizen session info) using AsyncLocalStorage.
 
 import { AsyncLocalStorage } from "async_hooks";
 
-export interface ChatwootContext {
-    conversationId?: number;
-    contactId?: number;
-    inboxId?: number | null;
+export interface AquaHubContext {
+    conversationId?: string;
+    ciudadanoId?: string;
+    alcaldia?: string;
 }
 
-const chatwootContextStorage = new AsyncLocalStorage<ChatwootContext>();
+const contextStorage = new AsyncLocalStorage<AquaHubContext>();
 
-/**
- * Get the current Chatwoot context from AsyncLocalStorage.
- * This is used by tools (like createTicketDirect) to automatically
- * link tickets to the current Chatwoot conversation and contact.
- */
-export function getCurrentChatwootContext(): ChatwootContext {
-    return chatwootContextStorage.getStore() || {};
+export function getCurrentContext(): AquaHubContext {
+    return contextStorage.getStore() || {};
 }
 
-/**
- * Run a function within a Chatwoot context.
- * All async operations within will have access to this context.
- */
-export function runWithChatwootContext<T>(
-    context: ChatwootContext,
+export function runWithContext<T>(
+    context: AquaHubContext,
     fn: () => T | Promise<T>
 ): T | Promise<T> {
-    return chatwootContextStorage.run(context, fn);
+    return contextStorage.run(context, fn);
 }

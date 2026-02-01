@@ -1,139 +1,61 @@
 // ============================================
-// CEA Native Tools - Production Ready
+// AquaHub Native Tools - Citizen Assistance
 // ============================================
-// These are the critical tools that MUST be native for reliability
 
 import { config } from "dotenv";
-config(); // Load environment variables first
+config();
 
 import { tool } from "@openai/agents";
 import { z } from "zod";
-import { ProxyAgent, fetch as undiciFetch } from "undici";
-import pg from "pg";
-import type {
-    CreateTicketInput,
-    CreateTicketResult,
-    DeudaResponse,
-    ConsumoResponse,
-    ContratoResponse,
-    TicketType,
-} from "./types.js";
-import { getCurrentChatwootContext } from "./context.js";
+import type { Proveedor, Pedido, Incidente, Alerta, PrediccionResponse } from "./types.js";
 
 // ============================================
 // Configuration
 // ============================================
 
-const CEA_API_BASE = "https://aquacis-cf-int.ceaqueretaro.gob.mx/Comercial/services";
-
-// Proxy configuration for whitelisted IP
-const PROXY_URL = process.env.CEA_PROXY_URL || null; // e.g., "http://10.128.0.7:3128"
-
-// PostgreSQL configuration for AGORA (Chatwoot)
-const PG_CONFIG = {
-    host: process.env.PGHOST || '136.107.45.255',
-    port: parseInt(process.env.PGPORT || '5432'),
-    user: process.env.PGUSER || 'postgres',
-    password: process.env.PGPASSWORD || '',
-    database: process.env.PGDATABASE || 'agora_production',
-    max: parseInt(process.env.PGPOOL_MAX || '10'),
-};
-
-// PostgreSQL connection pool
-const pgPool = new pg.Pool(PG_CONFIG);
-
-const TICKET_CODES: Record<TicketType, string> = {
-    fuga: "FUG",
-    aclaraciones: "ACL",
-    pagos: "PAG",
-    lecturas: "LEC",
-    revision_recibo: "REV",
-    recibo_digital: "DIG",
-    urgente: "URG"
-};
-
-// Map tool service types to PostgreSQL enum values (ticket_service_type)
-// Valid enum: clarifications, contract_change, payment, digital_receipt, report_reading, leak_report, receipt_review, human_agent, update_case, general
-const SERVICE_TYPE_MAP: Record<TicketType, string> = {
-    fuga: "leak_report",
-    aclaraciones: "clarifications",
-    pagos: "payment",
-    lecturas: "report_reading",
-    revision_recibo: "receipt_review",
-    recibo_digital: "digital_receipt",
-    urgente: "human_agent"
-};
-
-// Map priority values to PostgreSQL enum (ticket_priority: low, medium, high, urgent)
-const PRIORITY_MAP: Record<string, string> = {
-    baja: "low",
-    media: "medium",
-    alta: "high",
-    urgente: "urgent"
-};
-
-// Map status values to PostgreSQL enum (ticket_status)
-const STATUS_MAP: Record<string, string> = {
-    abierto: "open",
-    en_proceso: "in_progress",
-    escalado: "escalated",
-    esperando_cliente: "waiting_client",
-    esperando_interno: "waiting_internal",
-    resuelto: "resolved",
-    cerrado: "closed",
-    cancelado: "cancelled"
-};
+const AQUAHUB_API_BASE = process.env.AQUAHUB_API_URL || "http://localhost:8000";
 
 // ============================================
 // Utility Functions
 // ============================================
 
-async function fetchWithRetry(
-    url: string,
-    options: RequestInit,
+async function fetchAquaHub(
+    path: string,
+    options: RequestInit = {},
     maxRetries = 3,
     delayMs = 1000
-): Promise<Response> {
+): Promise<any> {
     let lastError: Error | null = null;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            let response: Response;
+            const url = `${AQUAHUB_API_BASE}${path}`;
+            console.log(`[AquaHub API] ${options.method || 'GET'} ${url} (attempt ${attempt})`);
 
-            // Use proxy for CEA API calls if configured
-            if (PROXY_URL && url.includes('ceaqueretaro.gob.mx')) {
-                console.log(`[API] Using proxy: ${PROXY_URL} for ${url}`);
+            const response = await fetch(url, {
+                ...options,
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...options.headers
+                },
+                signal: AbortSignal.timeout(30000)
+            });
 
-                const proxyAgent = new ProxyAgent(PROXY_URL);
-
-                // @ts-ignore - undici types are compatible at runtime
-                response = await undiciFetch(url, {
-                    method: options.method || 'GET',
-                    headers: options.headers,
-                    body: options.body as any,
-                    dispatcher: proxyAgent,
-                    signal: AbortSignal.timeout(30000)
-                });
-            } else {
-                // Regular fetch for non-CEA APIs
-                response = await fetch(url, {
-                    ...options,
-                    signal: AbortSignal.timeout(30000)
-                });
+            if (!response.ok) {
+                const errorBody = await response.text().catch(() => "");
+                if (attempt < maxRetries) {
+                    console.warn(`[AquaHub API] Attempt ${attempt} failed: ${response.status} ${errorBody}`);
+                    await new Promise(r => setTimeout(r, delayMs * attempt));
+                    continue;
+                }
+                throw new Error(`API error ${response.status}: ${errorBody}`);
             }
 
-            if (!response.ok && attempt < maxRetries) {
-                console.warn(`[API] Attempt ${attempt} failed with status ${response.status}, retrying...`);
-                await new Promise(r => setTimeout(r, delayMs * attempt));
-                continue;
-            }
-
-            return response;
+            return await response.json();
         } catch (error) {
             lastError = error as Error;
-            console.warn(`[API] Attempt ${attempt} error: ${lastError.message}`);
-
             if (attempt < maxRetries) {
+                console.warn(`[AquaHub API] Attempt ${attempt} error: ${lastError.message}`);
                 await new Promise(r => setTimeout(r, delayMs * attempt));
             }
         }
@@ -142,891 +64,508 @@ async function fetchWithRetry(
     throw lastError || new Error("Request failed after retries");
 }
 
-function parseXMLValue(xml: string, tag: string): string | null {
-    const regex = new RegExp(`<${tag}[^>]*>([^<]*)</${tag}>`, 'i');
-    const match = xml.match(regex);
-    return match ? match[1].trim() : null;
-}
-
-function parseXMLArray(xml: string, containerTag: string, itemTag: string): string[] {
-    const containerRegex = new RegExp(`<${containerTag}[^>]*>([\\s\\S]*?)</${containerTag}>`, 'gi');
-    const items: string[] = [];
-    let match;
-
-    while ((match = containerRegex.exec(xml)) !== null) {
-        items.push(match[1]);
-    }
-
-    return items;
-}
-
-function getMexicoDate(): Date {
+export function getMexicoDate(): Date {
     return new Date(new Date().toLocaleString("en-US", { timeZone: "America/Mexico_City" }));
 }
 
-// Synchronous folio generation (fallback only)
-// Format: {TYPE}-{YYYYMMDD}-{SEQUENCE} (e.g., ACL-20260106-0001)
-function generateTicketFolio(ticketType: TicketType): string {
-    const typeCode = TICKET_CODES[ticketType];
-    const now = getMexicoDate();
-
-    const year = now.getFullYear().toString();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const dateStr = `${year}${month}${day}`;
-
-    // Use timestamp for uniqueness (fallback when DB query not available)
-    const timestamp = now.getTime().toString().slice(-4);
-
-    return `${typeCode}-${dateStr}-${timestamp}`;
-}
-
-// PostgreSQL-based folio generation with proper sequential numbering
-// Format: {TYPE}-{YYYYMMDD}-{SEQUENCE} (e.g., ACL-20260106-0001)
-async function generateTicketFolioFromPG(ticketType: TicketType): Promise<string> {
-    const typeCode = TICKET_CODES[ticketType];
-    const now = getMexicoDate();
-
-    const year = now.getFullYear().toString();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const dateStr = `${year}${month}${day}`;
-
-    const prefix = `${typeCode}-${dateStr}`;
-
-    try {
-        // Query PostgreSQL for the last folio with this prefix
-        const result = await pgQuery<{ folio: string }>(`
-            SELECT folio FROM tickets
-            WHERE folio LIKE $1
-            ORDER BY folio DESC
-            LIMIT 1
-        `, [`${prefix}-%`]);
-
-        let nextNumber = 1;
-
-        if (result && result.length > 0) {
-            const lastFolio = result[0].folio;
-            const match = lastFolio.match(/-(\d{4})$/);
-            if (match) {
-                nextNumber = parseInt(match[1]) + 1;
-            }
-        }
-
-        return `${prefix}-${String(nextNumber).padStart(4, '0')}`;
-    } catch (error) {
-        console.warn(`[generateTicketFolioFromPG] DB query failed, using timestamp fallback:`, error);
-        // Fallback to timestamp-based folio
-        const timestamp = now.getTime().toString().slice(-4);
-        return `${prefix}-${timestamp}`;
-    }
-}
-
 // ============================================
-// SOAP Builders
-// ============================================
-
-function buildDeudaSOAP(contrato: string): string {
-    return `<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:int="http://interfazgenericagestiondeuda.occamcxf.occam.agbar.com/" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
-    <soapenv:Header>
-        <wsse:Security mustUnderstand="1">
-            <wsse:UsernameToken wsu:Id="UsernameTokenWSGESTIONDEUDA">
-                <wsse:Username>WSGESTIONDEUDA</wsse:Username>
-                <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">WSGESTIONDEUDA</wsse:Password>
-            </wsse:UsernameToken>
-        </wsse:Security>
-    </soapenv:Header>
-    <soapenv:Body>
-        <int:getDeuda>
-            <tipoIdentificador>CONTRATO</tipoIdentificador>
-            <valor>${contrato}</valor>
-            <explotacion>12</explotacion>
-            <idioma>es</idioma>
-        </int:getDeuda>
-    </soapenv:Body>
-</soapenv:Envelope>`;
-}
-
-function buildConsumoSOAP(contrato: string): string {
-    return `<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:occ="http://occamWS.ejb.negocio.occam.agbar.com" xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd" xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
-    <soapenv:Header>
-        <wsse:Security mustUnderstand="1">
-            <wsse:UsernameToken wsu:Id="UsernameToken-WSGESTIONDEUDA">
-                <wsse:Username>WSGESTIONDEUDA</wsse:Username>
-                <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">WSGESTIONDEUDA</wsse:Password>
-            </wsse:UsernameToken>
-        </wsse:Security>
-    </soapenv:Header>
-    <soapenv:Body>
-        <occ:getConsumos>
-            <explotacion>12</explotacion>
-            <contrato>${contrato}</contrato>
-            <idioma>es</idioma>
-        </occ:getConsumos>
-    </soapenv:Body>
-</soapenv:Envelope>`;
-}
-
-function buildContratoSOAP(contrato: string): string {
-    return `<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:occ="http://occamWS.ejb.negocio.occam.agbar.com">
-    <soapenv:Header/>
-    <soapenv:Body>
-        <occ:consultaDetalleContrato>
-            <numeroContrato>${contrato}</numeroContrato>
-            <idioma>es</idioma>
-        </occ:consultaDetalleContrato>
-    </soapenv:Body>
-</soapenv:Envelope>`;
-}
-
-// ============================================
-// Response Parsers
-// ============================================
-
-function parseDeudaResponse(xml: string): DeudaResponse {
-    try {
-        // Check for errors first
-        if (xml.includes("<faultstring>") || xml.includes("<error>")) {
-            const faultMsg = parseXMLValue(xml, "faultstring") || parseXMLValue(xml, "error") || "Error desconocido";
-            return { success: false, error: faultMsg, rawResponse: xml };
-        }
-
-        // Check for API error response
-        const codigoError = parseXMLValue(xml, "codigoError");
-        if (codigoError && codigoError !== "0") {
-            const descripcionError = parseXMLValue(xml, "descripcionError") || "Error desconocido";
-            return { success: false, error: descripcionError, rawResponse: xml };
-        }
-
-        // Parse debt values from CEA API response
-        // API returns: deudaTotal, deuda, deudaComision, saldoAnterior, saldoAnteriorTotal
-        const totalDeuda = parseFloat(parseXMLValue(xml, "deudaTotal") || parseXMLValue(xml, "deuda") || "0");
-        const saldoAnterior = parseFloat(parseXMLValue(xml, "saldoAnteriorTotal") || parseXMLValue(xml, "saldoAnterior") || "0");
-        const deudaActual = parseFloat(parseXMLValue(xml, "deuda") || "0");
-
-        // Get client info from response
-        const nombreCliente = parseXMLValue(xml, "nombreCliente") || "";
-        const direccion = parseXMLValue(xml, "direccion") || "";
-
-        // Conceptos - CEA API doesn't return detailed breakdown, so we create summary
-        const conceptos: any[] = [];
-        if (saldoAnterior > 0) {
-            conceptos.push({
-                periodo: "Saldo anterior",
-                concepto: "Adeudo de periodos anteriores",
-                monto: saldoAnterior,
-                fechaVencimiento: "",
-                estado: "vencido" as const
-            });
-        }
-        if (deudaActual > 0) {
-            conceptos.push({
-                periodo: "Periodo actual",
-                concepto: "Consumo del periodo",
-                monto: deudaActual,
-                fechaVencimiento: "",
-                estado: "por_vencer" as const
-            });
-        }
-
-        return {
-            success: true,
-            data: {
-                totalDeuda,
-                vencido: saldoAnterior,
-                porVencer: deudaActual,
-                conceptos,
-                nombreCliente,
-                direccion
-            }
-        };
-    } catch (error) {
-        return {
-            success: false,
-            error: `Error parsing response: ${error}`,
-            rawResponse: xml
-        };
-    }
-}
-
-function parseConsumoResponse(xml: string): ConsumoResponse {
-    try {
-        if (xml.includes("<faultstring>") || xml.includes("<error>")) {
-            const faultMsg = parseXMLValue(xml, "faultstring") || parseXMLValue(xml, "error") || "Error desconocido";
-            return { success: false, error: faultMsg };
-        }
-
-        const consumos: any[] = [];
-        // Match <Consumo> elements (capitalized as returned by CEA API)
-        const consumoMatches = xml.match(/<Consumo>[\s\S]*?<\/Consumo>/g) || [];
-
-        for (const consumoXml of consumoMatches) {
-            // Extract periodo and decode HTML entities (e.g., &lt;JUN&gt; -> <JUN>)
-            let periodo = parseXMLValue(consumoXml, "periodo") || "";
-            periodo = periodo.replace(/&lt;/g, '').replace(/&gt;/g, '').replace(/ - .*/, '').trim();
-
-            // Get year to build a better period label
-            const año = parseXMLValue(consumoXml, "año") || "";
-            if (año && periodo) {
-                periodo = `${periodo} ${año}`;
-            }
-
-            // Get consumption in cubic meters
-            const metrosCubicos = parseFloat(parseXMLValue(consumoXml, "metrosCubicos") || "0");
-
-            // Check if reading was estimated
-            const estimado = parseXMLValue(consumoXml, "estimado") === "true";
-
-            // Get reading date
-            const fechaLecturaRaw = parseXMLValue(consumoXml, "fechaLectura") || "";
-            const fechaLectura = fechaLecturaRaw ? fechaLecturaRaw.split('T')[0] : "";
-
-            consumos.push({
-                periodo,
-                consumoM3: metrosCubicos,
-                lecturaAnterior: 0,
-                lecturaActual: 0,
-                fechaLectura,
-                tipoLectura: estimado ? 'estimada' : 'real' as 'real' | 'estimada'
-            });
-        }
-
-        // Calculate average and trend (use last 12 months for average)
-        const recentConsumos = consumos.slice(0, 12);
-        const promedioMensual = recentConsumos.length > 0
-            ? recentConsumos.reduce((sum, c) => sum + c.consumoM3, 0) / recentConsumos.length
-            : 0;
-
-        let tendencia: 'aumentando' | 'estable' | 'disminuyendo' = 'estable';
-        if (consumos.length >= 6) {
-            const recent = consumos.slice(0, 3).reduce((s, c) => s + c.consumoM3, 0) / 3;
-            const older = consumos.slice(3, 6).reduce((s, c) => s + c.consumoM3, 0) / 3;
-            if (recent > older * 1.2) tendencia = 'aumentando';
-            else if (recent < older * 0.8) tendencia = 'disminuyendo';
-        }
-
-        return {
-            success: true,
-            data: { consumos, promedioMensual, tendencia }
-        };
-    } catch (error) {
-        return { success: false, error: `Error parsing response: ${error}` };
-    }
-}
-
-function parseContratoResponse(xml: string): ContratoResponse {
-    try {
-        if (xml.includes("<faultstring>") || xml.includes("<error>")) {
-            const faultMsg = parseXMLValue(xml, "faultstring") || parseXMLValue(xml, "error") || "Error desconocido";
-            return { success: false, error: faultMsg };
-        }
-
-        // Build address from API fields: calle, numero, municipio, provincia
-        const calle = parseXMLValue(xml, "calle") || "";
-        const numero = parseXMLValue(xml, "numero") || "";
-        const municipio = parseXMLValue(xml, "municipio") || "";
-        const provincia = parseXMLValue(xml, "provincia") || "";
-        const dirCorrespondencia = parseXMLValue(xml, "dirCorrespondencia") || "";
-
-        // Use dirCorrespondencia if available, otherwise build from components
-        let direccion = dirCorrespondencia;
-        if (!direccion && calle) {
-            direccion = `${calle} ${numero}`.trim();
-            if (municipio) direccion += `, ${municipio}`;
-        }
-
-        // Determine status based on fechaBaja
-        const fechaBaja = parseXMLValue(xml, "fechaBaja");
-        const estado = fechaBaja && !xml.includes('fechaBaja xmlns:xsi') ? 'suspendido' : 'activo';
-
-        // Format fechaAlta to readable date
-        const fechaAltaRaw = parseXMLValue(xml, "fechaAlta") || "";
-        const fechaAlta = fechaAltaRaw ? fechaAltaRaw.split('T')[0] : "";
-
-        return {
-            success: true,
-            data: {
-                numeroContrato: parseXMLValue(xml, "numeroContrato") || "",
-                titular: parseXMLValue(xml, "titular") || "",
-                direccion: direccion,
-                colonia: municipio || provincia || "",
-                codigoPostal: parseXMLValue(xml, "codigoPostal") || parseXMLValue(xml, "cp") || "",
-                tarifa: parseXMLValue(xml, "descUso") || parseXMLValue(xml, "tipoUso") || "",
-                estado: estado as 'activo' | 'suspendido' | 'cortado',
-                fechaAlta: fechaAlta,
-                ultimaLectura: parseXMLValue(xml, "numeroContador") || undefined
-            }
-        };
-    } catch (error) {
-        return { success: false, error: `Error parsing response: ${error}` };
-    }
-}
-
-// ============================================
-// PostgreSQL Helpers
-// ============================================
-
-async function pgQuery<T = any>(query: string, params?: any[]): Promise<T[]> {
-    const client = await pgPool.connect();
-    try {
-        const result = await client.query(query, params);
-        return result.rows as T[];
-    } finally {
-        client.release();
-    }
-}
-
-// ============================================
-// Ticket Creation Helper (for reuse)
-// ============================================
-
-export async function createTicketDirect(input: CreateTicketInput): Promise<CreateTicketResult> {
-    console.log(`[create_ticket_direct] Creating ticket:`, input);
-
-    // Get Chatwoot context for automatic linking
-    const chatwootContext = getCurrentChatwootContext();
-    console.log(`[create_ticket_direct] Chatwoot context: conversation=${chatwootContext.conversationId}, contact=${chatwootContext.contactId}`);
-
-    try {
-        // Generate folio with proper sequential numbering from PostgreSQL
-        const folio = await generateTicketFolioFromPG(input.service_type);
-
-        // Map values to PostgreSQL enum types
-        const serviceType = SERVICE_TYPE_MAP[input.service_type] || "general";
-        const ticketType = TICKET_CODES[input.service_type] || "GEN";
-        const priority = PRIORITY_MAP[input.priority || "media"] || "medium";
-        const status = "open"; // Always start as open
-
-        // Use Chatwoot context for contact_id and conversation_id if not explicitly provided
-        let contactId = input.contact_id ?? chatwootContext.contactId ?? null;
-        let conversationId = input.conversation_id ?? chatwootContext.conversationId ?? null;
-        let inboxId = input.inbox_id ?? chatwootContext.inboxId ?? null;
-        let clientName = input.client_name || null;
-
-        // If we have contactId from Chatwoot context, fetch client name
-        if (contactId && !clientName) {
-            try {
-                const contacts = await pgQuery<{ name: string }>(`
-                    SELECT name FROM contacts WHERE id = $1 LIMIT 1
-                `, [contactId]);
-                if (contacts && contacts.length > 0) {
-                    clientName = contacts[0].name;
-                    console.log(`[create_ticket_direct] Found contact name from Chatwoot: ${clientName}`);
-                }
-            } catch (err) {
-                console.warn(`[create_ticket_direct] Could not look up contact name:`, err);
-            }
-        }
-
-        // Look up contact_id by contract_number if still not found
-        if (!contactId && input.contract_number) {
-            try {
-                const contacts = await pgQuery<{ id: number; name: string }>(`
-                    SELECT id, name FROM contacts
-                    WHERE identifier = $1
-                       OR custom_attributes->>'contract_number' = $1
-                    LIMIT 1
-                `, [input.contract_number]);
-
-                if (contacts && contacts.length > 0) {
-                    contactId = contacts[0].id;
-                    clientName = clientName || contacts[0].name;
-                    console.log(`[create_ticket_direct] Found contact: ${contactId} (${clientName})`);
-                }
-            } catch (err) {
-                console.warn(`[create_ticket_direct] Could not look up contact:`, err);
-            }
-        }
-
-        // Insert into PostgreSQL with contact linkage
-        const result = await pgQuery<{ id: number; folio: string }>(`
-            INSERT INTO tickets (
-                account_id, folio, title, description, status, priority,
-                ticket_type, service_type, channel, contract_number,
-                client_name, contact_id, conversation_id, inbox_id,
-                metadata, created_at, updated_at
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7, $8, 'whatsapp', $9,
-                $10, $11, $12, $13,
-                $14, NOW(), NOW()
-            )
-            RETURNING id, folio
-        `, [
-            parseInt(process.env.AGENT_ACCOUNT_ID || '1'),
-            folio,
-            input.titulo,
-            input.descripcion,
-            status,
-            priority,
-            ticketType,
-            serviceType,
-            input.contract_number || null,
-            clientName || 'Cliente WhatsApp',
-            contactId,
-            conversationId,
-            inboxId,
-            JSON.stringify({
-                email: input.email || null,
-                ubicacion: input.ubicacion || null
-            })
-        ]);
-
-        const createdTicket = result[0];
-
-        console.log(`[create_ticket_direct] Created ticket with folio: ${createdTicket.folio}, contact_id: ${contactId}, conversation_id: ${conversationId}`);
-
-        return {
-            success: true,
-            folio: createdTicket.folio,
-            ticketId: String(createdTicket.id),
-            message: `Ticket creado exitosamente con folio ${createdTicket.folio}`
-        };
-    } catch (error) {
-        console.error(`[create_ticket_direct] Error:`, error);
-
-        // On PostgreSQL failure, return a local folio
-        const fallbackFolio = generateTicketFolio(input.service_type);
-
-        return {
-            success: true, // Still return success with local folio
-            folio: fallbackFolio,
-            warning: "Ticket creado localmente, sincronización pendiente",
-            message: `Ticket registrado con folio ${fallbackFolio}`
-        };
-    }
-}
-
-// ============================================
-// NATIVE TOOLS (Critical - Must be reliable)
+// NATIVE TOOLS
 // ============================================
 
 /**
- * GET DEUDA - Retrieves debt/balance information
- * Critical for: pagos agent
+ * LISTAR PROVEEDORES - Lists available water providers
  */
-export const getDeudaTool = tool({
-    name: "get_deuda",
-    description: `Obtiene el saldo y adeudo de un contrato CEA.
+export const listarProveedoresTool = tool({
+    name: "listar_proveedores",
+    description: `Lista los proveedores de agua (pipas) disponibles en AquaHub.
 
-RETORNA:
-- totalDeuda: Total a pagar
-- vencido: Monto vencido
-- porVencer: Monto por vencer
-- conceptos: Desglose de adeudos
+RETORNA lista de proveedores con:
+- nombre, calificacion, precio_por_litro
+- disponibilidad, certificaciones, telefono
+- alcaldia, tiempo estimado de llegada
 
-Usa este tool cuando el usuario pregunte por su saldo, deuda, cuánto debe, o quiera pagar.`,
+Filtros opcionales: disponibilidad, alcaldia.
+Usa cuando el ciudadano quiera ver proveedores disponibles, comparar precios o buscar pipas cerca.`,
     parameters: z.object({
-        contrato: z.string().describe("Número de contrato CEA (ej: 123456)")
+        alcaldia: z.string().nullable().optional().describe("Filtrar por alcaldia (ej: 'Coyoacán', 'Iztapalapa')"),
+        solo_disponibles: z.boolean().nullable().optional().default(true).describe("Mostrar solo proveedores disponibles")
     }),
-    execute: async ({ contrato }) => {
-        console.log(`[get_deuda] Fetching debt for contract: ${contrato}`);
+    execute: async ({ alcaldia, solo_disponibles }) => {
+        console.log(`[listar_proveedores] alcaldia=${alcaldia}, disponibles=${solo_disponibles}`);
 
         try {
-            const response = await fetchWithRetry(
-                `${CEA_API_BASE}/InterfazGenericaGestionDeudaWS`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
-                    body: buildDeudaSOAP(contrato)
-                }
-            );
+            const params = new URLSearchParams();
+            if (alcaldia) params.set("alcaldia", alcaldia);
+            if (solo_disponibles) params.set("disponible", "true");
 
-            const xml = await response.text();
-            const parsed = parseDeudaResponse(xml);
+            const proveedores: Proveedor[] = await fetchAquaHub(`/api/proveedores?${params.toString()}`);
 
-            if (!parsed.success) {
-                return { error: parsed.error, success: false };
-            }
-
-            // Format for agent consumption
-            const data = parsed.data!;
-            return {
-                success: true,
-                contrato,
-                totalDeuda: data.totalDeuda,
-                vencido: data.vencido,
-                porVencer: data.porVencer,
-                resumen: `Saldo total: ${data.totalDeuda.toFixed(2)} MXN${data.vencido > 0 ? ` (Vencido: ${data.vencido.toFixed(2)})` : ''}`,
-                conceptos: data.conceptos.slice(0, 5) // Limit to last 5
-            };
-        } catch (error) {
-            console.error(`[get_deuda] Error:`, error);
-            return {
-                success: false,
-                error: `No se pudo consultar el saldo: ${error instanceof Error ? error.message : 'Error desconocido'}`
-            };
-        }
-    }
-});
-
-/**
- * GET CONSUMO - Retrieves consumption history
- * Critical for: consumos agent
- */
-export const getConsumoTool = tool({
-    name: "get_consumo",
-    description: `Obtiene el historial de consumo de agua de un contrato.
-
-RETORNA:
-- consumos: Lista de consumos por periodo (m³)
-- promedioMensual: Promedio de consumo mensual
-- tendencia: Si el consumo está aumentando, estable o disminuyendo
-
-Usa cuando el usuario pregunte por su consumo, historial de lecturas, o cuánta agua ha gastado.`,
-    parameters: z.object({
-        contrato: z.string().describe("Número de contrato CEA")
-    }),
-    execute: async ({ contrato }) => {
-        console.log(`[get_consumo] Fetching consumption for contract: ${contrato}`);
-
-        try {
-            const response = await fetchWithRetry(
-                `${CEA_API_BASE}/InterfazOficinaVirtualClientesWS`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
-                    body: buildConsumoSOAP(contrato)
-                }
-            );
-
-            const xml = await response.text();
-            const parsed = parseConsumoResponse(xml);
-
-            if (!parsed.success) {
-                return { error: parsed.error, success: false };
-            }
-
-            const data = parsed.data!;
-
-            // Return up to 36 months (3 years) of consumption data
-            const allConsumos = data.consumos.slice(0, 36);
-
-            // Group consumos by year for easier querying
-            const consumosPorAño: Record<string, any[]> = {};
-            for (const c of allConsumos) {
-                const year = c.periodo.split(' ').pop() || 'Unknown';
-                if (!consumosPorAño[year]) consumosPorAño[year] = [];
-                consumosPorAño[year].push(c);
-            }
-
-            return {
-                success: true,
-                contrato,
-                promedioMensual: Math.round(data.promedioMensual),
-                tendencia: data.tendencia,
-                consumos: allConsumos.slice(0, 12), // Recent 12 months for display
-                consumosPorAño, // All data grouped by year
-                añosDisponibles: Object.keys(consumosPorAño).sort().reverse(),
-                resumen: `Promedio mensual: ${Math.round(data.promedioMensual)} m³ (Tendencia: ${data.tendencia}). Datos disponibles: ${Object.keys(consumosPorAño).sort().reverse().join(', ')}`
-            };
-        } catch (error) {
-            console.error(`[get_consumo] Error:`, error);
-            return {
-                success: false,
-                error: `No se pudo consultar el consumo: ${error instanceof Error ? error.message : 'Error desconocido'}`
-            };
-        }
-    }
-});
-
-/**
- * GET CONTRACT DETAILS - Retrieves contract information
- * Critical for: all agents that need contract validation
- */
-export const getContratoTool = tool({
-    name: "get_contract_details",
-    description: `Obtiene los detalles de un contrato CEA.
-
-RETORNA:
-- titular: Nombre del titular
-- direccion: Dirección del servicio
-- tarifa: Tipo de tarifa
-- estado: Estado del contrato (activo/suspendido/cortado)
-
-Usa para validar un contrato o conocer detalles del servicio.`,
-    parameters: z.object({
-        contrato: z.string().describe("Número de contrato CEA")
-    }),
-    execute: async ({ contrato }) => {
-        console.log(`[get_contract_details] Fetching contract: ${contrato}`);
-
-        try {
-            const response = await fetchWithRetry(
-                `${CEA_API_BASE}/InterfazGenericaContratacionWS`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'text/xml;charset=UTF-8' },
-                    body: buildContratoSOAP(contrato)
-                }
-            );
-
-            const xml = await response.text();
-            const parsed = parseContratoResponse(xml);
-
-            if (!parsed.success) {
-                return { error: parsed.error, success: false };
-            }
-
-            return {
-                success: true,
-                ...parsed.data
-            };
-        } catch (error) {
-            console.error(`[get_contract_details] Error:`, error);
-            return {
-                success: false,
-                error: `No se pudo consultar el contrato: ${error instanceof Error ? error.message : 'Error desconocido'}`
-            };
-        }
-    }
-});
-
-/**
- * CREATE TICKET - Creates a new support ticket
- * Critical for: all agents that create tickets
- */
-export const createTicketTool = tool({
-    name: "create_ticket",
-    description: `Crea un ticket en el sistema CEA y retorna el folio generado.
-
-TIPOS DE TICKET:
-- fuga: Reportes de fugas de agua
-- aclaraciones: Aclaraciones generales
-- pagos: Problemas con pagos
-- lecturas: Problemas con lecturas del medidor
-- revision_recibo: Revisión de recibo
-- recibo_digital: Solicitud de recibo digital
-- urgente: Solicitar asesor humano
-
-IMPORTANTE: Siempre incluye el folio en tu respuesta al usuario.`,
-    parameters: z.object({
-        service_type: z.enum(["fuga", "aclaraciones", "pagos", "lecturas", "revision_recibo", "recibo_digital", "urgente"])
-            .describe("Tipo de ticket"),
-        titulo: z.string().describe("Título breve del ticket"),
-        descripcion: z.string().describe("Descripción detallada del problema"),
-        contract_number: z.string().nullable().describe("Número de contrato (si aplica)"),
-        email: z.string().nullable().describe("Email del cliente (si aplica)"),
-        ubicacion: z.string().nullable().describe("Ubicación de la fuga (solo para fugas)"),
-        priority: z.enum(["urgente", "alta", "media", "baja"]).default("media")
-            .describe("Prioridad del ticket")
-    }),
-    execute: async (input) => {
-        return await createTicketDirect(input);
-    }
-});
-
-/**
- * GET CLIENT TICKETS - Retrieves tickets for a contract
- * Critical for: ticket agent
- */
-export const getClientTicketsTool = tool({
-    name: "get_client_tickets",
-    description: `Obtiene los tickets de un cliente por número de contrato.
-
-RETORNA lista de tickets con:
-- folio: Número de ticket
-- status: Estado (abierto, en_proceso, resuelto, etc.)
-- titulo: Título del ticket
-- created_at: Fecha de creación`,
-    parameters: z.object({
-        contract_number: z.string().describe("Número de contrato CEA")
-    }),
-    execute: async ({ contract_number }) => {
-        console.log(`[get_client_tickets] Fetching tickets for contract: ${contract_number}`);
-
-        try {
-            const tickets = await pgQuery<{
-                folio: string;
-                status: string;
-                title: string;
-                service_type: string;
-                created_at: Date;
-                description: string;
-            }>(`
-                SELECT folio, status, title, service_type, created_at, description
-                FROM tickets
-                WHERE contract_number = $1
-                ORDER BY created_at DESC
-                LIMIT 10
-            `, [contract_number]);
-
-            if (!tickets || tickets.length === 0) {
+            if (!proveedores || proveedores.length === 0) {
                 return {
                     success: true,
-                    tickets: [],
-                    message: "No se encontraron tickets para este contrato"
+                    proveedores: [],
+                    message: alcaldia
+                        ? `No se encontraron proveedores disponibles en ${alcaldia}`
+                        : "No hay proveedores disponibles en este momento"
                 };
             }
 
             return {
                 success: true,
-                tickets: tickets.map((t) => ({
-                    folio: t.folio,
-                    status: t.status,
-                    titulo: t.title,
-                    service_type: t.service_type,
-                    created_at: t.created_at,
-                    descripcion: t.description?.substring(0, 100)
+                proveedores: proveedores.map(p => ({
+                    id: p.id,
+                    nombre: p.nombre,
+                    calificacion: p.calificacion,
+                    precio_por_litro: p.precio_por_litro,
+                    disponible: p.disponible,
+                    alcaldia: p.alcaldia,
+                    telefono: p.telefono,
+                    certificaciones: p.certificaciones,
+                    tiempo_estimado: p.tiempo_estimado_llegada,
+                    flota: p.tamano_flota
                 })),
-                count: tickets.length
+                count: proveedores.length
             };
         } catch (error) {
-            console.error(`[get_client_tickets] Error:`, error);
+            console.error(`[listar_proveedores] Error:`, error);
             return {
                 success: false,
-                error: `No se pudieron consultar los tickets: ${error instanceof Error ? error.message : 'Error desconocido'}`
+                error: `No se pudieron consultar los proveedores: ${error instanceof Error ? error.message : 'Error desconocido'}`
             };
         }
     }
 });
 
 /**
- * SEARCH CUSTOMER BY CONTRACT - Finds customer in Chatwoot contacts table
- * Searches by identifier field or custom_attributes->contract_number
+ * CREAR PEDIDO - Creates a new water order
  */
-export const searchCustomerByContractTool = tool({
-    name: "search_customer_by_contract",
-    description: "Busca un cliente por su número de contrato en la base de datos CEA (Chatwoot contacts).",
+export const crearPedidoTool = tool({
+    name: "crear_pedido",
+    description: `Crea un nuevo pedido de agua en AquaHub.
+
+REQUIERE:
+- proveedor_id: ID del proveedor seleccionado
+- nombre_ciudadano: Nombre de quien solicita
+- cantidad_litros: Cantidad de agua en litros
+- precio_total: Precio total calculado
+- direccion, colonia, alcaldia: Ubicacion de entrega
+
+Usa cuando el ciudadano quiera pedir agua a un proveedor.
+IMPORTANTE: Primero usa listar_proveedores para obtener el proveedor_id.`,
     parameters: z.object({
-        contract_number: z.string().describe("Número de contrato CEA")
+        proveedor_id: z.string().describe("ID del proveedor (UUID)"),
+        nombre_ciudadano: z.string().describe("Nombre del ciudadano que solicita"),
+        cantidad_litros: z.number().int().positive().describe("Cantidad de litros solicitados"),
+        precio_total: z.number().positive().describe("Precio total del pedido"),
+        direccion: z.string().describe("Direccion de entrega"),
+        colonia: z.string().nullable().optional().describe("Colonia"),
+        alcaldia: z.string().nullable().optional().describe("Alcaldia"),
+        subsidio_aplicado: z.number().nullable().optional().default(0).describe("Monto de subsidio aplicado")
     }),
-    execute: async ({ contract_number }) => {
-        console.log(`[search_customer] Searching for contract: ${contract_number}`);
+    execute: async (input) => {
+        console.log(`[crear_pedido] Creating order for ${input.nombre_ciudadano}`);
 
         try {
-            // Search in Chatwoot contacts table
-            // First try identifier field, then custom_attributes->contract_number
-            const contacts = await pgQuery<{
-                id: number;
-                name: string;
-                email: string | null;
-                phone_number: string | null;
-                identifier: string | null;
-                custom_attributes: Record<string, any> | null;
-            }>(`
-                SELECT id, name, email, phone_number, identifier, custom_attributes
-                FROM contacts
-                WHERE identifier = $1
-                   OR custom_attributes->>'contract_number' = $1
-                LIMIT 1
-            `, [contract_number]);
+            const pedido: Pedido = await fetchAquaHub("/api/pedidos", {
+                method: "POST",
+                body: JSON.stringify({
+                    proveedor_id: input.proveedor_id,
+                    nombre_ciudadano: input.nombre_ciudadano,
+                    cantidad_litros: input.cantidad_litros,
+                    precio_total: input.precio_total,
+                    direccion: input.direccion,
+                    colonia: input.colonia || null,
+                    alcaldia: input.alcaldia || null,
+                    subsidio_aplicado: input.subsidio_aplicado
+                })
+            });
 
-            if (!contacts || contacts.length === 0) {
+            return {
+                success: true,
+                pedido_id: pedido.id,
+                estado: pedido.estado,
+                message: `Pedido creado exitosamente. ID: ${pedido.id}. Estado: ${pedido.estado}`
+            };
+        } catch (error) {
+            console.error(`[crear_pedido] Error:`, error);
+            return {
+                success: false,
+                error: `No se pudo crear el pedido: ${error instanceof Error ? error.message : 'Error desconocido'}`
+            };
+        }
+    }
+});
+
+/**
+ * CONSULTAR PEDIDO - Check order status
+ */
+export const consultarPedidoTool = tool({
+    name: "consultar_pedido",
+    description: `Consulta el estado de un pedido de agua por su ID.
+
+RETORNA:
+- estado: pendiente, aceptado, en_transito, entregado, cancelado
+- proveedor, cantidad, precio, direccion
+- timestamps de cada etapa
+
+Usa cuando el ciudadano quiera saber el estado de su pedido.`,
+    parameters: z.object({
+        pedido_id: z.string().describe("ID del pedido (UUID)")
+    }),
+    execute: async ({ pedido_id }) => {
+        console.log(`[consultar_pedido] Fetching order: ${pedido_id}`);
+
+        try {
+            const pedido: Pedido = await fetchAquaHub(`/api/pedidos/${pedido_id}`);
+
+            const estadoDescripcion: Record<string, string> = {
+                pendiente: "Tu pedido esta pendiente de aceptacion por el proveedor",
+                aceptado: "Tu pedido fue aceptado, el proveedor se esta preparando",
+                en_transito: "Tu agua esta en camino",
+                entregado: "Tu pedido fue entregado",
+                cancelado: "Tu pedido fue cancelado"
+            };
+
+            return {
+                success: true,
+                pedido_id: pedido.id,
+                estado: pedido.estado,
+                descripcion_estado: estadoDescripcion[pedido.estado] || pedido.estado,
+                cantidad_litros: pedido.cantidad_litros,
+                precio_total: pedido.precio_total,
+                subsidio_aplicado: pedido.subsidio_aplicado,
+                direccion: pedido.direccion,
+                creado_en: pedido.creado_en,
+                aceptado_en: pedido.aceptado_en,
+                entregado_en: pedido.entregado_en
+            };
+        } catch (error) {
+            console.error(`[consultar_pedido] Error:`, error);
+            return {
+                success: false,
+                error: `No se pudo consultar el pedido: ${error instanceof Error ? error.message : 'Error desconocido'}`
+            };
+        }
+    }
+});
+
+/**
+ * LISTAR PEDIDOS - List orders for a citizen
+ */
+export const listarPedidosTool = tool({
+    name: "listar_pedidos",
+    description: `Lista los pedidos de agua recientes, con filtros opcionales.
+
+RETORNA lista de pedidos con estado, proveedor, cantidad, fecha.
+Usa cuando el ciudadano quiera ver sus pedidos recientes o buscar un pedido.`,
+    parameters: z.object({
+        estado: z.enum(["pendiente", "aceptado", "en_transito", "entregado", "cancelado"]).nullable().optional()
+            .describe("Filtrar por estado del pedido"),
+        alcaldia: z.string().nullable().optional().describe("Filtrar por alcaldia")
+    }),
+    execute: async ({ estado, alcaldia }) => {
+        console.log(`[listar_pedidos] estado=${estado}, alcaldia=${alcaldia}`);
+
+        try {
+            const params = new URLSearchParams();
+            if (estado) params.set("estado", estado);
+            if (alcaldia) params.set("alcaldia", alcaldia);
+            params.set("limit", "10");
+
+            const pedidos: Pedido[] = await fetchAquaHub(`/api/pedidos?${params.toString()}`);
+
+            return {
+                success: true,
+                pedidos: pedidos.map(p => ({
+                    id: p.id,
+                    estado: p.estado,
+                    cantidad_litros: p.cantidad_litros,
+                    precio_total: p.precio_total,
+                    direccion: p.direccion,
+                    creado_en: p.creado_en
+                })),
+                count: pedidos.length
+            };
+        } catch (error) {
+            console.error(`[listar_pedidos] Error:`, error);
+            return {
+                success: false,
+                error: `No se pudieron consultar los pedidos: ${error instanceof Error ? error.message : 'Error desconocido'}`
+            };
+        }
+    }
+});
+
+/**
+ * REPORTAR INCIDENTE - Report a water incident
+ */
+export const reportarIncidenteTool = tool({
+    name: "reportar_incidente",
+    description: `Reporta un incidente de agua (fuga, falta de agua, contaminacion, etc.)
+
+TIPOS DE INCIDENTE:
+- fuga: Fuga de agua en vía publica o tubería
+- sin_agua: No hay servicio de agua
+- contaminacion: Agua contaminada o de mala calidad
+- infraestructura: Daño en infraestructura hidráulica
+- otro: Otro tipo de problema
+
+REQUIERE: tipo, descripcion, direccion/colonia/alcaldia
+Opcionales: hogares_afectados, duracion
+
+Usa cuando el ciudadano quiera reportar un problema de agua.`,
+    parameters: z.object({
+        tipo: z.enum(["fuga", "sin_agua", "contaminacion", "infraestructura", "otro"])
+            .describe("Tipo de incidente"),
+        descripcion: z.string().describe("Descripcion detallada del incidente"),
+        direccion: z.string().nullable().optional().describe("Direccion donde ocurre el incidente"),
+        colonia: z.string().nullable().optional().describe("Colonia"),
+        alcaldia: z.string().nullable().optional().describe("Alcaldia"),
+        hogares_afectados: z.number().int().nullable().optional().default(1).describe("Numero de hogares afectados"),
+        duracion: z.string().nullable().optional().describe("Cuanto tiempo lleva el problema (ej: '2 horas', '3 dias')")
+    }),
+    execute: async (input) => {
+        console.log(`[reportar_incidente] tipo=${input.tipo}, alcaldia=${input.alcaldia}`);
+
+        try {
+            const incidente: Incidente = await fetchAquaHub("/api/incidentes", {
+                method: "POST",
+                body: JSON.stringify({
+                    tipo: input.tipo,
+                    descripcion: input.descripcion,
+                    direccion: input.direccion || null,
+                    colonia: input.colonia || null,
+                    alcaldia: input.alcaldia || null,
+                    hogares_afectados: input.hogares_afectados,
+                    duracion: input.duracion || null
+                })
+            });
+
+            return {
+                success: true,
+                incidente_id: incidente.id,
+                estado: incidente.estado,
+                message: `Incidente reportado exitosamente. ID: ${incidente.id}. Un equipo revisara tu reporte.`
+            };
+        } catch (error) {
+            console.error(`[reportar_incidente] Error:`, error);
+            return {
+                success: false,
+                error: `No se pudo reportar el incidente: ${error instanceof Error ? error.message : 'Error desconocido'}`
+            };
+        }
+    }
+});
+
+/**
+ * CONSULTAR INCIDENTES - Check incidents in an area
+ */
+export const consultarIncidentesTool = tool({
+    name: "consultar_incidentes",
+    description: `Consulta incidentes reportados en una zona, con estadisticas.
+
+Usa cuando el ciudadano quiera saber si hay problemas de agua reportados en su zona.`,
+    parameters: z.object({
+        alcaldia: z.string().nullable().optional().describe("Filtrar por alcaldia"),
+        tipo: z.enum(["fuga", "sin_agua", "contaminacion", "infraestructura", "otro"]).nullable().optional()
+            .describe("Filtrar por tipo de incidente")
+    }),
+    execute: async ({ alcaldia, tipo }) => {
+        console.log(`[consultar_incidentes] alcaldia=${alcaldia}, tipo=${tipo}`);
+
+        try {
+            // Get both incidents and statistics
+            const params = new URLSearchParams();
+            if (alcaldia) params.set("alcaldia", alcaldia);
+            if (tipo) params.set("tipo", tipo);
+            params.set("limit", "10");
+
+            const [incidentes, estadisticas] = await Promise.all([
+                fetchAquaHub(`/api/incidentes?${params.toString()}`),
+                fetchAquaHub("/api/incidentes/estadisticas")
+            ]);
+
+            return {
+                success: true,
+                incidentes: (incidentes as Incidente[]).map(i => ({
+                    id: i.id,
+                    tipo: i.tipo,
+                    estado: i.estado,
+                    descripcion: i.descripcion,
+                    alcaldia: i.alcaldia,
+                    colonia: i.colonia,
+                    hogares_afectados: i.hogares_afectados,
+                    creado_en: i.creado_en
+                })),
+                estadisticas,
+                count: (incidentes as Incidente[]).length
+            };
+        } catch (error) {
+            console.error(`[consultar_incidentes] Error:`, error);
+            return {
+                success: false,
+                error: `No se pudieron consultar los incidentes: ${error instanceof Error ? error.message : 'Error desconocido'}`
+            };
+        }
+    }
+});
+
+/**
+ * CONSULTAR ALERTAS - Check active alerts
+ */
+export const consultarAlertasTool = tool({
+    name: "consultar_alertas",
+    description: `Consulta las alertas activas de AquaHub (escasez, emergencias, programas de apoyo, conservacion).
+
+TIPOS DE ALERTA:
+- escasez: Alertas de escasez de agua
+- conservacion: Recomendaciones de ahorro de agua
+- programa: Programas de subsidio o apoyo
+- emergencia: Emergencias hidricas
+
+Usa cuando el ciudadano pregunte por alertas, noticias, avisos o situacion del agua en su zona.`,
+    parameters: z.object({
+        tipo: z.enum(["escasez", "conservacion", "programa", "emergencia"]).nullable().optional()
+            .describe("Filtrar por tipo de alerta")
+    }),
+    execute: async ({ tipo }) => {
+        console.log(`[consultar_alertas] tipo=${tipo}`);
+
+        try {
+            const params = new URLSearchParams();
+            if (tipo) params.set("tipo", tipo);
+            params.set("limit", "10");
+
+            const alertas: Alerta[] = await fetchAquaHub(`/api/alertas?${params.toString()}`);
+
+            if (!alertas || alertas.length === 0) {
                 return {
-                    success: false,
-                    found: false,
-                    message: "Cliente no encontrado"
+                    success: true,
+                    alertas: [],
+                    message: "No hay alertas activas en este momento"
                 };
             }
 
-            const contact = contacts[0];
-            const customAttrs = contact.custom_attributes || {};
-
             return {
                 success: true,
-                found: true,
-                customer: {
-                    id: contact.id,
-                    nombre: contact.name || 'Sin nombre',
-                    contrato: contact.identifier || customAttrs.contract_number || contract_number,
-                    email: contact.email || customAttrs.email || null,
-                    whatsapp: contact.phone_number || customAttrs.whatsapp || null,
-                    recibo_digital: customAttrs.recibo_digital || false
-                }
+                alertas: alertas.map(a => ({
+                    titulo: a.titulo,
+                    mensaje: a.mensaje,
+                    tipo: a.tipo,
+                    zonas: a.zonas_objetivo,
+                    fecha: a.enviado_en
+                })),
+                count: alertas.length
             };
         } catch (error) {
-            console.error(`[search_customer] Error:`, error);
+            console.error(`[consultar_alertas] Error:`, error);
             return {
                 success: false,
-                error: error instanceof Error ? error.message : 'Error desconocido'
+                error: `No se pudieron consultar las alertas: ${error instanceof Error ? error.message : 'Error desconocido'}`
             };
         }
     }
 });
 
 /**
- * UPDATE TICKET STATUS - Updates a ticket
+ * CONSULTAR PREDICCION - Check demand prediction for an area
  */
-export const updateTicketTool = tool({
-    name: "update_ticket",
-    description: `Actualiza el estado u otros campos de un ticket existente.
+export const consultarPrediccionTool = tool({
+    name: "consultar_prediccion",
+    description: `Consulta la prediccion de demanda de agua para una alcaldia.
 
-ESTADOS:
-- abierto, en_proceso, esperando_cliente, esperando_interno, escalado, resuelto, cerrado, cancelado`,
+RETORNA:
+- demanda_predicha: nivel numerico de demanda
+- intensidad: baja, media, alta, critica
+- recomendaciones: sugerencias para el ciudadano
+
+Usa cuando el ciudadano pregunte sobre la situacion del agua en su alcaldia o quiera saber si habra escasez.`,
     parameters: z.object({
-        folio: z.string().describe("Folio del ticket a actualizar"),
-        status: z.enum(["abierto", "en_proceso", "esperando_cliente", "esperando_interno", "escalado", "resuelto", "cerrado", "cancelado"]).nullable().describe("Nuevo estado del ticket (opcional)"),
-        priority: z.enum(["urgente", "alta", "media", "baja"]).nullable().describe("Nueva prioridad del ticket (opcional)"),
-        notes: z.string().nullable().describe("Notas adicionales (opcional)")
+        alcaldia: z.string().describe("Alcaldia de CDMX (ej: 'Coyoacán', 'Iztapalapa', 'Benito Juárez')")
     }),
-    execute: async ({ folio, status, priority, notes }) => {
-        console.log(`[update_ticket] Updating ticket: ${folio}`);
+    execute: async ({ alcaldia }) => {
+        console.log(`[consultar_prediccion] alcaldia=${alcaldia}`);
 
         try {
-            // Build dynamic SET clause
-            const setClauses: string[] = ['updated_at = NOW()'];
-            const params: any[] = [];
-            let paramIndex = 1;
+            const prediccion: PrediccionResponse = await fetchAquaHub(
+                `/api/predicciones/demanda/${encodeURIComponent(alcaldia)}`
+            );
 
-            if (status) {
-                const pgStatus = STATUS_MAP[status] || status;
-                setClauses.push(`status = $${paramIndex++}`);
-                params.push(pgStatus);
-            }
-            if (priority) {
-                const pgPriority = PRIORITY_MAP[priority] || priority;
-                setClauses.push(`priority = $${paramIndex++}`);
-                params.push(pgPriority);
-            }
-            if (notes) {
-                setClauses.push(`resolution_notes = $${paramIndex++}`);
-                params.push(notes);
-            }
-            if (status === 'resuelto') {
-                setClauses.push('resolved_at = NOW()');
-            }
-
-            params.push(folio); // Last param for WHERE clause
-
-            await pgQuery(`
-                UPDATE tickets
-                SET ${setClauses.join(', ')}
-                WHERE folio = $${paramIndex}
-            `, params);
+            const intensidadEmoji: Record<string, string> = {
+                baja: "verde",
+                media: "amarillo",
+                alta: "naranja",
+                critica: "rojo"
+            };
 
             return {
                 success: true,
-                folio,
-                message: `Ticket ${folio} actualizado correctamente`
+                alcaldia: prediccion.alcaldia,
+                demanda: prediccion.demanda_predicha,
+                intensidad: prediccion.intensidad,
+                nivel: intensidadEmoji[prediccion.intensidad] || prediccion.intensidad,
+                confianza: prediccion.confianza,
+                recomendaciones: prediccion.recomendaciones,
+                factores: prediccion.factores
             };
         } catch (error) {
-            console.error(`[update_ticket] Error:`, error);
+            console.error(`[consultar_prediccion] Error:`, error);
             return {
                 success: false,
-                error: error instanceof Error ? error.message : 'Error desconocido'
+                error: `No se pudo consultar la prediccion: ${error instanceof Error ? error.message : 'Error desconocido'}`
+            };
+        }
+    }
+});
+
+/**
+ * CANCELAR PEDIDO - Cancel a water order
+ */
+export const cancelarPedidoTool = tool({
+    name: "cancelar_pedido",
+    description: `Cancela un pedido de agua que aun no ha sido entregado.
+
+Solo se pueden cancelar pedidos que NO estan en estado "entregado".
+Usa cuando el ciudadano quiera cancelar un pedido.`,
+    parameters: z.object({
+        pedido_id: z.string().describe("ID del pedido a cancelar (UUID)")
+    }),
+    execute: async ({ pedido_id }) => {
+        console.log(`[cancelar_pedido] Cancelling order: ${pedido_id}`);
+
+        try {
+            const pedido: Pedido = await fetchAquaHub(`/api/pedidos/${pedido_id}/cancelar`, {
+                method: "POST"
+            });
+
+            return {
+                success: true,
+                pedido_id: pedido.id,
+                estado: pedido.estado,
+                message: `Pedido ${pedido_id} cancelado exitosamente`
+            };
+        } catch (error) {
+            console.error(`[cancelar_pedido] Error:`, error);
+            return {
+                success: false,
+                error: `No se pudo cancelar el pedido: ${error instanceof Error ? error.message : 'Error desconocido'}`
             };
         }
     }
 });
 
 // ============================================
-// Export all native tools as an array
+// Export all native tools
 // ============================================
 
 export const nativeTools = [
-    getDeudaTool,
-    getConsumoTool,
-    getContratoTool,
-    createTicketTool,
-    getClientTicketsTool,
-    searchCustomerByContractTool,
-    updateTicketTool
+    listarProveedoresTool,
+    crearPedidoTool,
+    consultarPedidoTool,
+    listarPedidosTool,
+    reportarIncidenteTool,
+    consultarIncidentesTool,
+    consultarAlertasTool,
+    consultarPrediccionTool,
+    cancelarPedidoTool
 ];
-
-// Export individually for selective use
-export {
-    generateTicketFolio,
-    getMexicoDate,
-    fetchWithRetry
-};
