@@ -43,8 +43,11 @@ async function fetchAquaHub(
 
             if (!response.ok) {
                 const errorBody = await response.text().catch(() => "");
+                if (response.status === 500) {
+                    console.error(`[AquaHub API] 500 Internal Server Error - response body:`, errorBody);
+                }
                 if (attempt < maxRetries) {
-                    console.warn(`[AquaHub API] Attempt ${attempt} failed: ${response.status} ${errorBody}`);
+                    console.warn(`[AquaHub API] Attempt ${attempt} failed: ${response.status} ${errorBody.substring(0, 200)}`);
                     await new Promise(r => setTimeout(r, delayMs * attempt));
                     continue;
                 }
@@ -327,18 +330,19 @@ Usa cuando el ciudadano quiera reportar un problema de agua.`,
     execute: async (input) => {
         console.log(`[reportar_incidente] tipo=${input.tipo}, alcaldia=${input.alcaldia}`);
 
+        const payload = {
+            tipo: input.tipo,
+            descripcion: input.descripcion,
+            direccion: input.direccion || null,
+            colonia: input.colonia || null,
+            alcaldia: input.alcaldia || null,
+            hogares_afectados: input.hogares_afectados,
+            duracion: input.duracion || null
+        };
         try {
             const incidente: Incidente = await fetchAquaHub("/api/incidentes", {
                 method: "POST",
-                body: JSON.stringify({
-                    tipo: input.tipo,
-                    descripcion: input.descripcion,
-                    direccion: input.direccion || null,
-                    colonia: input.colonia || null,
-                    alcaldia: input.alcaldia || null,
-                    hogares_afectados: input.hogares_afectados,
-                    duracion: input.duracion || null
-                })
+                body: JSON.stringify(payload)
             });
 
             return {
@@ -349,6 +353,7 @@ Usa cuando el ciudadano quiera reportar un problema de agua.`,
             };
         } catch (error) {
             console.error(`[reportar_incidente] Error:`, error);
+            console.error(`[reportar_incidente] Request payload (for backend debug):`, JSON.stringify(payload));
             return {
                 success: false,
                 error: `No se pudo reportar el incidente: ${error instanceof Error ? error.message : 'Error desconocido'}`

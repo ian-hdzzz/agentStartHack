@@ -14,6 +14,8 @@ const WELCOME_MESSAGE = `¡Hola! 👋 Bienvenido a WaterHub. Aquí tu voz cuenta
 // Configuration
 // ============================================
 
+const WATERHUB_MAP_URL = (process.env.WATERHUB_MAP_URL || "http://192.168.194.104:8080/").replace(/\/?$/, "/");
+
 const MODELS = {
     CLASSIFIER: "gpt-4.1-mini",
     SPECIALIST: "gpt-4.1",
@@ -186,7 +188,7 @@ FLUJO (uno a la vez, amigable):
 7. Despues de crear, SIEMPRE manda un RESUMEN de lo recibido y luego el cierre:
    - Primera linea: "Resumen: [tipo], [ubicacion en texto: calle/colonia/alcaldia si la tienes, no coordenadas], [descripcion breve]."
    - Segunda linea: "Perfecto, tu voz sera escuchada. Se creo un nuevo reporte en [direccion/colonia en texto]."
-   - Tercera linea (obligatoria): "Puedes ver el mapa y tu reporte aqui: https://aquahub.whoopflow.com/"
+   - Tercera linea (obligatoria, como boton): escribe "Ver mapa" (o "Abre el mapa") y en la linea siguiente SOLO el enlace: ${WATERHUB_MAP_URL} (envialo tal cual; en WhatsApp se vera como enlace clicable).
    Usa la direccion real (calle, colonia, alcaldia) en el resumen cuando el mensaje del usuario la traiga; si solo hay coordenadas, di "ubicacion indicada" o las coords si no hay mas.
 
 REGLAS:

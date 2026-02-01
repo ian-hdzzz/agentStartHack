@@ -30,6 +30,34 @@ for (const envVar of requiredEnvVars) {
 // Reverse Geocoding (Google Maps API)
 // ============================================
 
+interface AddressComponent {
+    long_name: string;
+    short_name: string;
+    types: string[];
+}
+
+function buildAddressFromComponents(components: AddressComponent[]): string | null {
+    const get = (type: string) => components.find((c) => c.types.includes(type))?.long_name || "";
+    const route = get("route");
+    const streetNumber = get("street_number");
+    const sublocality = get("sublocality") || get("sublocality_level_1");
+    const locality = get("locality");
+    const admin2 = get("administrative_area_level_2");
+    const postalCode = get("postal_code");
+    const parts: string[] = [];
+    if (route) parts.push(streetNumber ? `${route} ${streetNumber}` : route);
+    if (sublocality) parts.push(`Col. ${sublocality}`);
+    else if (locality) parts.push(locality);
+    if (admin2) parts.push(admin2);
+    if (postalCode) parts.push(`CP ${postalCode}`);
+    return parts.length > 0 ? parts.join(", ") : null;
+}
+
+function hasStreetOrColonia(components: AddressComponent[]): boolean {
+    const types = new Set(components.flatMap((c) => c.types));
+    return types.has("route") || types.has("street_number") || types.has("sublocality") || types.has("sublocality_level_1");
+}
+
 async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
     const apiKey = process.env.GOOGLE_MAPS_API_KEY;
     if (!apiKey) return null;
@@ -37,9 +65,29 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
         const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}&language=es`;
         const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
         if (!res.ok) return null;
-        const data = (await res.json()) as { results?: { formatted_address?: string }[] };
-        const addr = data.results?.[0]?.formatted_address;
-        return addr || null;
+        const data = (await res.json()) as {
+            results?: { address_components?: AddressComponent[]; formatted_address?: string }[];
+        };
+        const results = data.results || [];
+        if (results.length === 0) return null;
+
+        let bestBuilt: string | null = null;
+        let bestFormatted: string | null = null;
+
+        for (const r of results) {
+            const comps = r.address_components || [];
+            const built = comps.length ? buildAddressFromComponents(comps) : null;
+            const formatted = r.formatted_address || null;
+            if (built && hasStreetOrColonia(comps)) {
+                return built;
+            }
+            if (built && built.length > (bestBuilt?.length ?? 0)) bestBuilt = built;
+            if (formatted && formatted.length > (bestFormatted?.length ?? 0)) bestFormatted = formatted;
+        }
+
+        if (bestBuilt && (bestBuilt.length >= 15 || (bestBuilt.includes("Col.") || bestBuilt.includes(",")))) return bestBuilt;
+        if (bestFormatted) return bestFormatted;
+        return bestBuilt;
     } catch {
         return null;
     }
