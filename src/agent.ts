@@ -191,7 +191,7 @@ FLUJO (uno a la vez, amigable):
 8. Solo DESPUES de que reportar_incidente haya sido llamado (y haya devuelto resultado), manda el RESUMEN y el cierre:
    - Primera linea: "Resumen: [tipo], [ubicacion en texto: calle/colonia/alcaldia si la tienes, no coordenadas], [descripcion breve]."
    - Segunda linea: "Perfecto, tu voz sera escuchada. Se creo un nuevo reporte en [direccion/colonia en texto]."
-   - Tercera linea (obligatoria, como boton): escribe "Ver mapa" (o "Abre el mapa") y en la linea siguiente SOLO el enlace: ${WATERHUB_MAP_URL} (envialo tal cual; en WhatsApp se vera como enlace clicable).
+   - Tercera linea (obligatoria): escribe "Aqui puedes ver el mapa:" y en la misma linea o la siguiente SOLO UNA VEZ el enlace ${WATERHUB_MAP_URL}. No repitas el link ni pongas "Ver mapa" aparte; solo el texto "Aqui puedes ver el mapa:" seguido del enlace una vez.
    Usa la direccion real (calle, colonia, alcaldia) en el resumen cuando el mensaje del usuario la traiga; si solo hay coordenadas, di "ubicacion indicada" o las coords si no hay mas.
 
 REGLAS:
