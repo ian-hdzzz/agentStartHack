@@ -1,5 +1,5 @@
 // ============================================
-// AquaHub Agent Types - Citizen Assistance
+// WaterHub Agent Types - Community Map / Voice
 // ============================================
 
 export interface ChatRequest {
@@ -23,14 +23,7 @@ export interface ChatResponse {
     };
 }
 
-export type Classification =
-    | "pedir_agua"
-    | "reportar_incidente"
-    | "consultar_pedido"
-    | "alertas"
-    | "proveedores"
-    | "hablar_asesor"
-    | "informacion";
+export type Classification = "subir_voz" | "informacion";
 
 // ============================================
 // Workflow Types
@@ -55,7 +48,7 @@ export interface WorkflowOutput {
 }
 
 // ============================================
-// AquaHub API Types
+// WaterHub / Map API Types
 // ============================================
 
 export interface Proveedor {
