@@ -7,8 +7,8 @@ import { z } from "zod";
 import type { WorkflowInput, WorkflowOutput, Classification } from "./types.js";
 import { reportarIncidenteTool, getMexicoDate } from "./tools.js";
 
-// Mensaje de bienvenida (primera interacción) — amigable, comunidad, anonimato
-const WELCOME_MESSAGE = `¡Hola! 👋 Bienvenido a WaterHub. Aquí tu voz cuenta: todo es anónimo y lo que subas se ve en el mapa para más transparencia y acción. ¿Quieres subir tu voz al mapa o tienes alguna pregunta?`;
+// Mensaje de bienvenida (solo primera interacción) — amigable, comunidad, anonimato
+const WELCOME_MESSAGE = `¡Hola! 👋 Bienvenido a WaterHub. Aquí tu voz cuenta: todo es anónimo y lo que subas se ve en el mapa para más transparencia y acción. ¿Quieres subir tu voz al mapa o saber cómo funciona?`;
 
 // ============================================
 // Configuration
@@ -127,14 +127,18 @@ ESTILO:
 - Respuestas cortas y directas
 - Maximo 1 pregunta por respuesta
 
-SI PREGUNTAN "QUE PUEDES HACER?" o "COMO FUNCIONA?":
-"Aqui en WaterHub puedes subir tu voz al mapa: fotos, reportes o comentarios sobre agua en tu zona (fugas, desbordamientos, alcantarillas tapadas, sin agua, etc.). Todo es anonimo y se ve en el mapa para que la comunidad y las autoridades vean donde hay problemas y donde se ha tomado accion. Tu voz cuenta."
+SI PREGUNTAN "COMO FUNCIONA?" o "QUE ES WATERHUB?":
+Explica con estas ideas (con tus palabras, tono cercano):
+- Hoy no hay un lugar donde la ciudadania pueda ver en conjunto los problemas de agua ni si se esta haciendo algo al respecto. WaterHub es ese lugar: un mapa publico donde se suben fotos y comentarios sobre agua en tu zona (fugas, desbordamientos, sin agua, alcantarillas tapadas, etc.).
+- Todo es anonimo. Lo que subes se ve en el mapa para dar visibilidad y exigir que las autoridades actuen; asi la gente puede ver donde se concentran las quejas y donde el gobierno ha tomado accion (o no).
+- Objetivo: mas transparencia, que la poblacion se sienta escuchada y que se vean los resultados (o la falta de ellos) de la accion de gobierno en agua, drenaje e infraestructura.
+
+NO repitas el mensaje de bienvenida ni saludos largos; ve al punto.
 
 SOBRE WATERHUB:
 - Plataforma donde la ciudadania sube su voz al mapa (fotos, reportes) sobre agua, drenaje, sistemas fluviales
 - Todo es anonimo por diseño
-- El mapa muestra zonas con mas reportes y donde se ha actuado; mas transparencia sobre lo que hace el gobierno
-- Objetivo: crear comunidad, unir al pueblo, que la poblacion se sienta escuchada y se vean resultados de la accion de gobierno
+- El mapa muestra zonas con mas reportes y donde se ha actuado
 - Funciona en CDMX (y se puede extender)
 
 SI PIDEN "HABLAR CON ALGUIEN" O "ASESOR":
@@ -290,9 +294,9 @@ export async function runWorkflow(input: WorkflowInput): Promise<WorkflowOutput>
             const newItems = agentResult.newItems;
             toolsUsed.push(...agentResult.toolsUsed);
 
-            // Prepend welcome on first message (before we push to history)
+            // Primera interacción: solo bienvenida (evitar doble mensaje del agente)
             const isFirstMessage = conversation.history.length === 0;
-            const finalOutput = isFirstMessage ? `${WELCOME_MESSAGE}\n\n${output}` : output;
+            const finalOutput = isFirstMessage ? WELCOME_MESSAGE : output;
 
             // Step 4: Update conversation history (store what the user saw)
             conversation.history.push(userMessage);
