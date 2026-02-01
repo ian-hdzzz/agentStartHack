@@ -126,12 +126,23 @@ async function reverseGeocode(lat: number, lng: number): Promise<string | null> 
 
 const WHISPER_API = "https://api.openai.com/v1/audio/transcriptions";
 
+// Whisper only accepts: flac, m4a, mp3, mp4, mpeg, mpga, oga, ogg, wav, webm. WhatsApp voice notes = OGG/Opus.
+function whisperFileFormat(mimeType?: string): { ext: string; type: string } {
+    const m = (mimeType || "").toLowerCase();
+    if (m.includes("mpeg") || m.includes("mp3") || m.includes("mpga")) return { ext: "mp3", type: "audio/mpeg" };
+    if (m.includes("webm")) return { ext: "webm", type: "audio/webm" };
+    if (m.includes("wav")) return { ext: "wav", type: "audio/wav" };
+    if (m.includes("m4a") || m.includes("mp4")) return { ext: "m4a", type: "audio/mp4" };
+    if (m.includes("oga")) return { ext: "oga", type: "audio/ogg" };
+    return { ext: "ogg", type: "audio/ogg" };
+}
+
 async function transcribeAudio(buffer: ArrayBuffer, mimeType?: string): Promise<string | null> {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return null;
-    const ext = mimeType?.includes("mpeg") || mimeType?.includes("mp3") ? "mp3" : "ogg";
+    const { ext, type } = whisperFileFormat(mimeType);
     try {
-        const blob = new Blob([buffer], { type: mimeType || "audio/ogg" });
+        const blob = new Blob([buffer], { type });
         const formData = new FormData();
         formData.append("file", blob, `audio.${ext}`);
         formData.append("model", "whisper-1");
