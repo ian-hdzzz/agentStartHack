@@ -6,6 +6,7 @@ import { config } from "dotenv";
 config();
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { Pool } from "pg";
 import { tool } from "@openai/agents";
 import { z } from "zod";
 import type { Proveedor, Pedido, Incidente, Alerta, PrediccionResponse } from "./types.js";
@@ -16,11 +17,20 @@ import type { Proveedor, Pedido, Incidente, Alerta, PrediccionResponse } from ".
 
 const AQUAHUB_API_BASE = process.env.AQUAHUB_API_URL || "http://localhost:8000";
 
+let dbPool: Pool | null = null;
+
 function getSupabase(): SupabaseClient | null {
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_ANON_KEY;
     if (!url || !key) return null;
     return createClient(url, key);
+}
+
+function getDbPool(): Pool | null {
+    const url = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL;
+    if (!url || !url.startsWith("postgresql://")) return null;
+    if (!dbPool) dbPool = new Pool({ connectionString: url, ssl: { rejectUnauthorized: false } });
+    return dbPool;
 }
 
 type TipoQuejaSupabase = "sin_agua" | "fuga" | "agua_contaminada" | "baja_presion" | "otro";
@@ -352,13 +362,48 @@ Usa cuando el ciudadano quiera reportar un problema de agua.`,
     execute: async (input) => {
         console.log(`[reportar_incidente] tipo=${input.tipo}, alcaldia=${input.alcaldia}`);
 
+        const texto = [input.descripcion, input.direccion].filter(Boolean).join(". ");
+        const tipoSupabase = mapTipoToSupabase(input.tipo);
+
+        const pool = getDbPool();
+        if (pool) {
+            console.log(`[reportar_incidente] Saving to Postgres (public.quejas)`);
+            try {
+                const res = await pool.query(
+                    `INSERT INTO public.quejas (texto, tipo, alcaldia, colonia, latitud, longitud)
+                     VALUES ($1, $2::tipo_queja, $3, $4, $5, $6)
+                     RETURNING id`,
+                    [
+                        texto,
+                        tipoSupabase,
+                        input.alcaldia || null,
+                        input.colonia || null,
+                        input.latitud ?? null,
+                        input.longitud ?? null
+                    ]
+                );
+                const id = res.rows?.[0]?.id;
+                return {
+                    success: true,
+                    incidente_id: id,
+                    estado: "reportado",
+                    message: `Reporte guardado. Tu voz se vera en el mapa. ID: ${id ?? "ok"}.`
+                };
+            } catch (e) {
+                console.error(`[reportar_incidente] Postgres error:`, e);
+                return {
+                    success: false,
+                    error: `No se pudo guardar el reporte: ${e instanceof Error ? e.message : "Error desconocido"}`
+                };
+            }
+        }
+
         const supabase = getSupabase();
         if (supabase) {
             console.log(`[reportar_incidente] Saving to Supabase (quejas)`);
-            const texto = [input.descripcion, input.direccion].filter(Boolean).join(". ");
             const row = {
                 texto,
-                tipo: mapTipoToSupabase(input.tipo),
+                tipo: tipoSupabase,
                 alcaldia: input.alcaldia || null,
                 colonia: input.colonia || null,
                 latitud: input.latitud ?? null,
@@ -391,7 +436,7 @@ Usa cuando el ciudadano quiera reportar un problema de agua.`,
             }
         }
 
-        console.log(`[reportar_incidente] Supabase not configured, using AquaHub API`);
+        console.log(`[reportar_incidente] No DB configured, using AquaHub API`);
         const payload = {
             tipo: input.tipo,
             descripcion: input.descripcion,
@@ -439,6 +484,49 @@ Usa cuando el ciudadano quiera saber si hay problemas de agua reportados en su z
     }),
     execute: async ({ alcaldia, tipo }) => {
         console.log(`[consultar_incidentes] alcaldia=${alcaldia}, tipo=${tipo}`);
+
+        const pool = getDbPool();
+        if (pool) {
+            try {
+                const conditions: string[] = [];
+                const params: unknown[] = [];
+                let idx = 0;
+                if (alcaldia) {
+                    idx++;
+                    conditions.push(`alcaldia = $${idx}`);
+                    params.push(alcaldia);
+                }
+                if (tipo) {
+                    idx++;
+                    conditions.push(`tipo = $${idx}::tipo_queja`);
+                    params.push(mapTipoToSupabase(tipo));
+                }
+                const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+                const sql = `SELECT id, texto, tipo, alcaldia, colonia, latitud, longitud, created_at
+                            FROM public.quejas${where} ORDER BY created_at DESC LIMIT 10`;
+                const res = await pool.query(sql, params);
+                const incidentes = (res.rows || []).map((r: { id: number; texto: string; tipo: string; alcaldia: string | null; colonia: string | null; latitud: number | null; longitud: number | null; created_at: string }) => ({
+                    id: String(r.id),
+                    tipo: r.tipo,
+                    estado: "reportado",
+                    descripcion: r.texto,
+                    alcaldia: r.alcaldia,
+                    colonia: r.colonia,
+                    latitud: r.latitud,
+                    longitud: r.longitud,
+                    creado_en: r.created_at
+                }));
+                return {
+                    success: true,
+                    incidentes,
+                    estadisticas: { total: incidentes.length },
+                    count: incidentes.length
+                };
+            } catch (e) {
+                console.error(`[consultar_incidentes] Postgres error:`, e);
+                return { success: false, error: e instanceof Error ? e.message : "Error desconocido" };
+            }
+        }
 
         const supabase = getSupabase();
         if (supabase) {
